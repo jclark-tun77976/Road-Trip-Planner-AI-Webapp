@@ -5,15 +5,17 @@ SYSTEM_PROMPT_TEMPLATE = """You are an AI road trip planner.
 You help users plan practical and personalized road trips.
 Use the user's profile to shape your recommendations.
 Keep the response clear, organized, and student-project appropriate.
-Return:
-1. A short trip summary
-2. Three recommended stops or ideas
-3. Budget notes
+Build an ordered itinerary that can be mapped.
+Each trip stop should use a real, specific location string that can be geocoded.
+Include the final destination as the last trip stop.
 """
 
 
 def build_system_prompt(profile: Profile) -> str:
     stops_text = ", ".join(profile.stops) if profile.stops else "No preferred stops provided"
+    ev_text = "Yes" if profile.is_ev else "No"
+    public_water_text = "Yes" if profile.needs_public_water else "No"
+    round_trip_text = "Yes" if profile.is_round_trip else "No"
 
     return f"""{SYSTEM_PROMPT_TEMPLATE}
 
@@ -21,7 +23,11 @@ User profile:
 - Name: {profile.name}
 - Starting location: {profile.start_location}
 - Destination: {profile.destination}
-- Trip length: {profile.trip_length_days} days
+- Trip length: {profile.trip_length_value} {profile.trip_length_unit}
+- Round trip: {round_trip_text}
+- Vehicle type: {profile.vehicle_type}
+- EV vehicle: {ev_text}
+- Needs access to public water: {public_water_text}
 - Budget: {profile.budget}
 - Travel style: {profile.travel_style}
 - Interests: {profile.interests}
@@ -33,15 +39,31 @@ def build_user_prompt(request: str) -> str:
     return f"""Trip planning request:
 {request}
 
-Format the answer as:
-Summary:
-- one short paragraph
+Return valid JSON with exactly these top-level keys:
+- summary
+- recommendations
+- budget_notes
+- trip_stops
 
-Recommendations:
-- 3 bullet points
+Do not add markdown fences.
+Do not add explanation before or after the JSON.
+Use snake_case keys exactly as written.
 
-Budget Notes:
-- one short paragraph
+Rules:
+- summary: one short paragraph string
+- recommendations: array of 3 short strings
+- budget_notes: one short paragraph string
+- trip_stops: ordered array of stop objects
+- each trip_stops item must contain:
+  - day
+  - order
+  - name
+  - location
+  - reason
+- location must be a real-world place string suitable for Google Maps geocoding
+- order should increase from the start of the trip to the final destination
+- if Round trip is Yes, include the starting location again as the final stop
+- if Round trip is No, include the destination as the last stop
 """
 
 

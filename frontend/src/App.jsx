@@ -1,14 +1,37 @@
 import { useEffect, useState } from "react";
+import ItineraryPanel from "./components/ItineraryPanel";
+import TripMap from "./components/TripMap";
 import "./App.css";
 
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
+const VEHICLE_TYPE_OPTIONS = [
+  "Hitchhiker",
+  "Bicycle",
+  "Motorcycle",
+  "Compact car",
+  "Sedan",
+  "SUV",
+  "Minivan",
+  "Pickup truck",
+  "Camper van",
+  "RV",
+  "Truck driver",
+];
+
+const TRIP_LENGTH_UNITS = ["hours", "days", "weeks"];
+
 const INITIAL_PROFILE = {
   name: "",
   start_location: "",
   destination: "",
-  trip_length_days: "",
+  trip_length_value: "",
+  trip_length_unit: "days",
+  is_round_trip: false,
+  vehicle_type: "Sedan",
+  is_ev: false,
+  needs_public_water: false,
   budget: "",
   travel_style: "",
   interests: "",
@@ -21,6 +44,7 @@ function App() {
   const [request, setRequest] = useState("");
   const [response, setResponse] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [loadingSeconds, setLoadingSeconds] = useState(0);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -32,7 +56,13 @@ function App() {
         name: parsedProfile.name ?? "",
         start_location: parsedProfile.start_location ?? "",
         destination: parsedProfile.destination ?? "",
-        trip_length_days: parsedProfile.trip_length_days ?? "",
+        trip_length_value:
+          parsedProfile.trip_length_value ?? parsedProfile.trip_length_days ?? "",
+        trip_length_unit: parsedProfile.trip_length_unit ?? "days",
+        is_round_trip: parsedProfile.is_round_trip ?? false,
+        vehicle_type: parsedProfile.vehicle_type ?? "Sedan",
+        is_ev: parsedProfile.is_ev ?? false,
+        needs_public_water: parsedProfile.needs_public_water ?? false,
         budget: parsedProfile.budget ?? "",
         travel_style: parsedProfile.travel_style ?? "",
         interests: parsedProfile.interests ?? "",
@@ -44,11 +74,29 @@ function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!loading) {
+      setLoadingSeconds(0);
+      return undefined;
+    }
+
+    const startedAt = Date.now();
+    const intervalId = window.setInterval(() => {
+      setLoadingSeconds(Math.floor((Date.now() - startedAt) / 1000) + 1);
+    }, 1000);
+
+    setLoadingSeconds(1);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [loading]);
+
   function handleProfileChange(event) {
-    const { name, value } = event.target;
+    const { name, type, value, checked } = event.target;
     const updatedProfile = {
       ...profile,
-      [name]: value,
+      [name]: type === "checkbox" ? checked : value,
     };
 
     setProfile(updatedProfile);
@@ -86,6 +134,22 @@ function App() {
 
   async function handleSubmit(event) {
     event.preventDefault();
+
+    if (!profile.start_location.trim()) {
+      setError("Starting Location is required.");
+      return;
+    }
+
+    if (!profile.destination.trim()) {
+      setError("Destination is required.");
+      return;
+    }
+
+    if (!profile.trip_length_value) {
+      setError("Trip length is required.");
+      return;
+    }
+
     setLoading(true);
     setError("");
 
@@ -98,7 +162,7 @@ function App() {
         body: JSON.stringify({
           profile: {
             ...profile,
-            trip_length_days: Number(profile.trip_length_days),
+            trip_length_value: Number(profile.trip_length_value),
             stops: profile.stops.filter((stop) => stop.trim() !== ""),
           },
           request,
@@ -157,15 +221,37 @@ function App() {
             placeholder="Philadelphia"
           />
 
-          <label className="label">Trip Length (Days)</label>
-          <input
-            className="input"
-            type="number"
-            name="trip_length_days"
-            value={profile.trip_length_days}
-            onChange={handleProfileChange}
-            placeholder="4"
-          />
+          <label className="label">Trip Length</label>
+          <div className="trip-length-group">
+            <input
+              className="input trip-length-input"
+              type="number"
+              min="1"
+              name="trip_length_value"
+              value={profile.trip_length_value}
+              onChange={handleProfileChange}
+              placeholder="4"
+            />
+
+            <div className="segment-switch" role="group" aria-label="Trip length unit">
+              {TRIP_LENGTH_UNITS.map((unit) => (
+                <button
+                  key={unit}
+                  type="button"
+                  className={`segment-option${
+                    profile.trip_length_unit === unit ? " active" : ""
+                  }`}
+                  onClick={() =>
+                    handleProfileChange({
+                      target: { name: "trip_length_unit", type: "text", value: unit },
+                    })
+                  }
+                >
+                  {unit}
+                </button>
+              ))}
+            </div>
+          </div>
 
           <label className="label">Destination</label>
           <input
@@ -176,6 +262,56 @@ function App() {
             onChange={handleProfileChange}
             placeholder="Pittsburgh"
           />
+
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              name="is_round_trip"
+              checked={profile.is_round_trip}
+              onChange={handleProfileChange}
+            />
+            <span>Round trip</span>
+          </label>
+
+          {profile.is_round_trip && (
+            <p className="helper-text">
+              This trip will return to your starting location at the end.
+            </p>
+          )}
+
+          <label className="label">Vehicle Type</label>
+          <select
+            className="input"
+            name="vehicle_type"
+            value={profile.vehicle_type}
+            onChange={handleProfileChange}
+          >
+            {VEHICLE_TYPE_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              name="is_ev"
+              checked={profile.is_ev}
+              onChange={handleProfileChange}
+            />
+            <span>EV vehicle</span>
+          </label>
+
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              name="needs_public_water"
+              checked={profile.needs_public_water}
+              onChange={handleProfileChange}
+            />
+            <span>Need access to public water</span>
+          </label>
 
           <label className="label">Budget</label>
           <input
@@ -247,35 +383,59 @@ function App() {
 
           <p className="char-count">Character count: {request.length}</p>
 
+          {loading && (
+            <p className="thinking-text">Thinking... {loadingSeconds}s</p>
+          )}
+
           <button type="submit" className="button" disabled={loading}>
-            {loading ? "Loading..." : "Submit"}
+            {loading ? `Thinking... ${loadingSeconds}s` : "Submit"}
           </button>
 
           <div className="preview-box">
             <h3>Current Request</h3>
             <p>{request || "Your trip request will appear here."}</p>
 
-            {error && <p>{error}</p>}
-
-            {response && (
-              <div>
-                <h3>AI Response</h3>
-                <p>{response.summary}</p>
-
-                <h4>Recommendations</h4>
-                <ul>
-                  {response.recommendations.map((item, index) => (
-                    <li key={index}>{item}</li>
-                  ))}
-                </ul>
-
-                <h4>Budget Notes</h4>
-                <p>{response.budget_notes}</p>
-              </div>
-            )}
+            {error && <p className="error-text">{error}</p>}
           </div>
         </div>
       </form>
+
+      {response && (
+        <section className="results-section">
+          <div className="result-card">
+            <div className="section-header">
+              <h3>Trip Overview</h3>
+              <p>{response.trip_stops.length} stops mapped</p>
+            </div>
+
+            <p>{response.summary}</p>
+
+            <h4>Recommendations</h4>
+            <ul>
+              {response.recommendations.map((item, index) => (
+                <li key={index}>{item}</li>
+              ))}
+            </ul>
+
+            <h4>Budget Notes</h4>
+            <p>{response.budget_notes}</p>
+
+            {response.warnings?.length > 0 && (
+              <div className="warning-box">
+                <h4>Planning Notes</h4>
+                <ul>
+                  {response.warnings.map((warning, index) => (
+                    <li key={index}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+
+          <TripMap route={response.route} />
+          <ItineraryPanel response={response} />
+        </section>
+      )}
     </div>
   );
 }
