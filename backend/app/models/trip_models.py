@@ -6,6 +6,9 @@ class Profile(BaseModel):
     start_location: str
     destination: str
     trip_length_days: int
+    vehicle_type: str
+    is_ev: bool = False
+    needs_public_water: bool = False
     budget: str
     travel_style: str
     interests: str

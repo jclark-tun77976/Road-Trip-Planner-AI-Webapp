@@ -4,11 +4,28 @@ import "./App.css";
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
+const VEHICLE_TYPE_OPTIONS = [
+  "Hitchhiker",
+  "Bicycle",
+  "Motorcycle",
+  "Compact car",
+  "Sedan",
+  "SUV",
+  "Minivan",
+  "Pickup truck",
+  "Camper van",
+  "RV",
+  "Truck driver",
+];
+
 const INITIAL_PROFILE = {
   name: "",
   start_location: "",
   destination: "",
   trip_length_days: "",
+  vehicle_type: "Sedan",
+  is_ev: false,
+  needs_public_water: false,
   budget: "",
   travel_style: "",
   interests: "",
@@ -33,6 +50,9 @@ function App() {
         start_location: parsedProfile.start_location ?? "",
         destination: parsedProfile.destination ?? "",
         trip_length_days: parsedProfile.trip_length_days ?? "",
+        vehicle_type: parsedProfile.vehicle_type ?? "Sedan",
+        is_ev: parsedProfile.is_ev ?? false,
+        needs_public_water: parsedProfile.needs_public_water ?? false,
         budget: parsedProfile.budget ?? "",
         travel_style: parsedProfile.travel_style ?? "",
         interests: parsedProfile.interests ?? "",
@@ -45,10 +65,10 @@ function App() {
   }, []);
 
   function handleProfileChange(event) {
-    const { name, value } = event.target;
+    const { name, type, value, checked } = event.target;
     const updatedProfile = {
       ...profile,
-      [name]: value,
+      [name]: type === "checkbox" ? checked : value,
     };
 
     setProfile(updatedProfile);
@@ -176,6 +196,40 @@ function App() {
             onChange={handleProfileChange}
             placeholder="Pittsburgh"
           />
+
+          <label className="label">Vehicle Type</label>
+          <select
+            className="input"
+            name="vehicle_type"
+            value={profile.vehicle_type}
+            onChange={handleProfileChange}
+          >
+            {VEHICLE_TYPE_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              name="is_ev"
+              checked={profile.is_ev}
+              onChange={handleProfileChange}
+            />
+            <span>EV vehicle</span>
+          </label>
+
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              name="needs_public_water"
+              checked={profile.needs_public_water}
+              onChange={handleProfileChange}
+            />
+            <span>Need access to public water</span>
+          </label>
 
           <label className="label">Budget</label>
           <input

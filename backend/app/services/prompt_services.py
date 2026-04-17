@@ -14,6 +14,8 @@ Return:
 
 def build_system_prompt(profile: Profile) -> str:
     stops_text = ", ".join(profile.stops) if profile.stops else "No preferred stops provided"
+    ev_text = "Yes" if profile.is_ev else "No"
+    public_water_text = "Yes" if profile.needs_public_water else "No"
 
     return f"""{SYSTEM_PROMPT_TEMPLATE}
 
@@ -22,6 +24,9 @@ User profile:
 - Starting location: {profile.start_location}
 - Destination: {profile.destination}
 - Trip length: {profile.trip_length_days} days
+- Vehicle type: {profile.vehicle_type}
+- EV vehicle: {ev_text}
+- Needs access to public water: {public_water_text}
 - Budget: {profile.budget}
 - Travel style: {profile.travel_style}
 - Interests: {profile.interests}
