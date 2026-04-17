@@ -1,29 +1,15 @@
-import json
 import os
 
 from dotenv import load_dotenv
 from google import genai
 
 from app.models.trip_models import TripRequest, TripResponse
+from app.services.mapping_services import build_route_data
 from app.services.prompt_services import build_full_prompt
-
+from app.services.trip_parser import parse_trip_plan
 
 
 load_dotenv()
-
-
-def clean_model_json(text: str) -> str:
-    cleaned = text.strip()
-
-    if cleaned.startswith("```json"):
-        cleaned = cleaned.removeprefix("```json").strip()
-    elif cleaned.startswith("```"):
-        cleaned = cleaned.removeprefix("```").strip()
-
-    if cleaned.endswith("```"):
-        cleaned = cleaned.removesuffix("```").strip()
-
-    return cleaned
 
 
 def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
@@ -36,28 +22,34 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
 
     response = client.models.generate_content(
         model="gemini-2.5-flash-lite",
-        contents=(
-            f"{full_prompt}\n\n"
-            "Return valid JSON with exactly these keys: "
-            "summary, recommendations, budget_notes. "
-            "The recommendations value must be an array of 3 strings."
-        ),
+        contents=full_prompt,
     )
 
-    response_text = clean_model_json(response.text or "")
+    generated_plan, warnings = parse_trip_plan(response.text or "", trip_request.profile)
+    route = None
+    enriched_stops = generated_plan.trip_stops
+    route_warnings: list[str] = []
 
     try:
-        parsed = json.loads(response_text)
-    except json.JSONDecodeError:
-        parsed = {
-            "summary": response_text,
-            "recommendations": [],
-            "budget_notes": "Model did not return valid JSON, so the raw response was used.",
-        }
+        route, enriched_stops, route_warnings = build_route_data(
+            start_location=trip_request.profile.start_location,
+            destination=(
+                trip_request.profile.start_location
+                if trip_request.profile.is_round_trip
+                else trip_request.profile.destination
+            ),
+            trip_stops=generated_plan.trip_stops,
+            vehicle_type=trip_request.profile.vehicle_type,
+        )
+    except Exception as exc:
+        route_warnings.append(f"Google Maps route data is unavailable right now: {exc}")
 
     return TripResponse(
-        summary=parsed.get("summary", ""),
-        recommendations=parsed.get("recommendations", []),
-        budget_notes=parsed.get("budget_notes", ""),
+        summary=generated_plan.summary,
+        recommendations=generated_plan.recommendations,
+        budget_notes=generated_plan.budget_notes,
+        trip_stops=enriched_stops,
+        route=route,
+        warnings=warnings + route_warnings,
         prompt_used=full_prompt,
     )
