@@ -1,0 +1,12 @@
+{
+  "name": "ai-roadtripapp",
+  "private": true,
+  "scripts": {
+    "frontend": "npm --prefix frontend run dev",
+    "backend": "sh -c 'cd backend && source venv/bin/activate && uvicorn app.main:app --reload'",
+    "dev": "concurrently \"npm run backend\" \"npm run frontend\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}
