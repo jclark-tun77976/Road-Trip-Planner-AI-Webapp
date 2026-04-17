@@ -1,25 +1,87 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import "./App.css";
 
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+
+const INITIAL_PROFILE = {
+  name: "",
+  start_location: "",
+  destination: "",
+  trip_length_days: "",
+  budget: "",
+  travel_style: "",
+  interests: "",
+  stops: [""],
+};
+
 function App() {
-  const [profile, setProfile] = useState({
-    name: "",
-    preferences: "",
-    goals: "",
-    budget: "",
-  });
+  const [profile, setProfile] = useState(INITIAL_PROFILE);
 
   const [request, setRequest] = useState("");
   const [response, setResponse] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  useEffect(() => {
+    const savedProfile = localStorage.getItem("roadTripProfile");
+    if (savedProfile) {
+      const parsedProfile = JSON.parse(savedProfile);
+      setProfile({
+        ...INITIAL_PROFILE,
+        name: parsedProfile.name ?? "",
+        start_location: parsedProfile.start_location ?? "",
+        destination: parsedProfile.destination ?? "",
+        trip_length_days: parsedProfile.trip_length_days ?? "",
+        budget: parsedProfile.budget ?? "",
+        travel_style: parsedProfile.travel_style ?? "",
+        interests: parsedProfile.interests ?? "",
+        stops:
+          Array.isArray(parsedProfile.stops) && parsedProfile.stops.length > 0
+            ? parsedProfile.stops
+            : [""],
+      });
+    }
+  }, []);
+
   function handleProfileChange(event) {
     const { name, value } = event.target;
-    setProfile({
+    const updatedProfile = {
       ...profile,
       [name]: value,
-    });
+    };
+
+    setProfile(updatedProfile);
+    localStorage.setItem("roadTripProfile", JSON.stringify(updatedProfile));
+  }
+
+  function handleStopChange(index, value) {
+    const updatedStops = profile.stops.map((stop, stopIndex) =>
+      stopIndex === index ? value : stop
+    );
+
+    const updatedProfile = {
+      ...profile,
+      stops: updatedStops,
+    };
+
+    setProfile(updatedProfile);
+    localStorage.setItem("roadTripProfile", JSON.stringify(updatedProfile));
+  }
+
+  function addStopField() {
+    const updatedProfile = {
+      ...profile,
+      stops: [...profile.stops, ""],
+    };
+
+    setProfile(updatedProfile);
+    localStorage.setItem("roadTripProfile", JSON.stringify(updatedProfile));
+  }
+
+  function clearProfile() {
+    setProfile(INITIAL_PROFILE);
+    localStorage.removeItem("roadTripProfile");
   }
 
   async function handleSubmit(event) {
@@ -28,19 +90,34 @@ function App() {
     setError("");
 
     try {
-      const res = await fetch("http://127.0.0.1:8000/plan", {
+      const res = await fetch(`${API_BASE_URL}/api/plan`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          profile,
+          profile: {
+            ...profile,
+            trip_length_days: Number(profile.trip_length_days),
+            stops: profile.stops.filter((stop) => stop.trim() !== ""),
+          },
           request,
         }),
       });
 
       if (!res.ok) {
-        throw new Error("Failed to get response from backend");
+        let errorMessage = `Backend request failed (${res.status})`;
+
+        try {
+          const errorData = await res.json();
+          if (typeof errorData?.detail === "string" && errorData.detail) {
+            errorMessage = errorData.detail;
+          }
+        } catch {
+          // Keep the status-based fallback if the backend response is not JSON.
+        }
+
+        throw new Error(errorMessage);
       }
 
       const data = await res.json();
@@ -69,25 +146,35 @@ function App() {
             onChange={handleProfileChange}
             placeholder="Enter your name"
           />
-
-          <label className="label">Preferences</label>
+          
+          <label className="label">Starting Location</label>
           <input
             className="input"
             type="text"
-            name="preferences"
-            value={profile.preferences}
+            name="start_location"
+            value={profile.start_location}
             onChange={handleProfileChange}
-            placeholder="Scenic, cheap, family-friendly..."
+            placeholder="Philadelphia"
           />
 
-          <label className="label">Goals</label>
+          <label className="label">Trip Length (Days)</label>
+          <input
+            className="input"
+            type="number"
+            name="trip_length_days"
+            value={profile.trip_length_days}
+            onChange={handleProfileChange}
+            placeholder="4"
+          />
+
+          <label className="label">Destination</label>
           <input
             className="input"
             type="text"
-            name="goals"
-            value={profile.goals}
+            name="destination"
+            value={profile.destination}
             onChange={handleProfileChange}
-            placeholder="Relaxing trip, sightseeing, food..."
+            placeholder="Pittsburgh"
           />
 
           <label className="label">Budget</label>
@@ -97,8 +184,54 @@ function App() {
             name="budget"
             value={profile.budget}
             onChange={handleProfileChange}
-            placeholder="$1000"
+            placeholder="low, medium, or high"
           />
+
+          <label className="label">Travel Style</label>
+          <input
+            className="input"
+            type="text"
+            name="travel_style"
+            value={profile.travel_style}
+            onChange={handleProfileChange}
+            placeholder="scenic, relaxed, adventurous"
+          />
+
+          <label className="label">Interests</label>
+          <input
+            className="input"
+            type="text"
+            name="interests"
+            value={profile.interests}
+            onChange={handleProfileChange}
+            placeholder="nature, food, small towns"
+          />
+
+          <label className="label">Stops (Optional)</label>
+          {profile.stops.map((stop, index) => (
+            <input
+              key={index}
+              className="input"
+              type="text"
+              value={stop}
+              onChange={(event) => handleStopChange(index, event.target.value)}
+              placeholder={`Stop ${index + 1}`}
+            />
+          ))}
+
+          {profile.stops[profile.stops.length - 1]?.trim() && (
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={addStopField}
+            >
+              Add another stop
+            </button>
+          )}
+
+          <button type="button" className="clear-button" onClick={clearProfile}>
+            Clear profile
+          </button>
         </div>
 
         <div className="card">
@@ -127,12 +260,17 @@ function App() {
             {response && (
               <div>
                 <h3>AI Response</h3>
-                <p>{response.result.summary}</p>
+                <p>{response.summary}</p>
+
+                <h4>Recommendations</h4>
                 <ul>
-                  {response.result.recommendations.map((item, index) => (
+                  {response.recommendations.map((item, index) => (
                     <li key={index}>{item}</li>
                   ))}
                 </ul>
+
+                <h4>Budget Notes</h4>
+                <p>{response.budget_notes}</p>
               </div>
             )}
           </div>
