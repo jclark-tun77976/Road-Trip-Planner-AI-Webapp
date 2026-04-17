@@ -1,0 +1,75 @@
+.page {
+  min-height: 100vh;
+  background-color: #0f172a;
+  color: white;
+  padding: 30px;
+  font-family: Arial, sans-serif;
+}
+
+.title {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.container {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.card {
+  flex: 1;
+  background-color: #1e293b;
+  padding: 20px;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.label {
+  font-weight: bold;
+  margin-top: 8px;
+}
+
+.input {
+  padding: 10px;
+  border-radius: 8px;
+  border: none;
+  font-size: 14px;
+}
+
+.textarea {
+  min-height: 150px;
+  padding: 10px;
+  border-radius: 8px;
+  border: none;
+  font-size: 14px;
+  resize: vertical;
+}
+
+.char-count {
+  font-size: 14px;
+  color: #cbd5e1;
+  margin-top: 4px;
+}
+
+.button {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 8px;
+  border: none;
+  background-color: #7c3aed;
+  color: white;
+  cursor: pointer;
+  font-weight: bold;
+  font-size: 14px;
+}
+
+.preview-box {
+  margin-top: 15px;
+  background-color: #0f172a;
+  padding: 15px;
+  border-radius: 10px;
+  min-height: 120px;
+}
