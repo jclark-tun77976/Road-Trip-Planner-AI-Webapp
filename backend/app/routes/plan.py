@@ -1,22 +1,14 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
-from app.models.trip_models import TripRequest
+from app.models.trip_models import TripRequest, TripResponse
+from app.services.llm_services import generate_trip_plan
 
 router = APIRouter()
 
 
-@router.post("/plan")
+@router.post("/plan", response_model=TripResponse)
 def create_plan(data: TripRequest):
-    return {
-        "message": "Dummy response from FastAPI",
-        "profile": data.profile.model_dump(),
-        "request": data.request,
-        "result": {
-            "summary": f"{data.profile.name} wants a road trip plan with a budget of {data.profile.budget}.",
-            "recommendations": [
-                "Choose scenic stops based on your preferences.",
-                "Set a daily spending limit for food and hotels.",
-                "Plan around your main trip goals.",
-            ],
-        },
-    }
+    try:
+        return generate_trip_plan(data)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))

@@ -66,6 +66,30 @@
   font-size: 14px;
 }
 
+.secondary-button {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #64748b;
+  background-color: transparent;
+  color: white;
+  cursor: pointer;
+  font-weight: bold;
+  font-size: 14px;
+}
+
+.clear-button {
+  margin-top: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #ef4444;
+  background-color: transparent;
+  color: #fecaca;
+  cursor: pointer;
+  font-weight: bold;
+  font-size: 14px;
+}
+
 .preview-box {
   margin-top: 15px;
   background-color: #0f172a;
