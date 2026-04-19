@@ -188,10 +188,9 @@
 .results-section {
   width: 100%;
   margin-top: 20px;
-  display: grid;
-  grid-template-columns: 1fr;
+  display: flex;
+  flex-direction: column;
   gap: 20px;
-  align-items: start;
 }
 
 .result-card {
@@ -199,6 +198,56 @@
   padding: 20px;
   border-radius: 12px;
   min-height: 220px;
+}
+
+.thread-card {
+  background-color: #162033;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.thread-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+}
+
+.thread-header h2,
+.thread-header p,
+.thread-request-box h4,
+.thread-request-box p {
+  margin: 0;
+}
+
+.thread-label {
+  margin: 0 0 6px;
+  color: #93c5fd;
+  font-size: 13px;
+  font-weight: bold;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.thread-request-box {
+  background-color: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.thread-response-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(320px, 1.2fr);
+  gap: 20px;
+  align-items: start;
 }
 
 .section-header {
@@ -228,12 +277,59 @@
   background-color: #0f172a;
 }
 
+.map-layer-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background-color: #162033;
+}
+
+.map-layer-controls h3 {
+  margin: 0 0 6px;
+}
+
+.map-layer-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px 14px;
+}
+
+.map-layer-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background-color: #0f172a;
+  border: 1px solid #334155;
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.map-layer-option input {
+  margin: 0;
+}
+
 .map-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.refinement-card {
+  width: 100%;
+}
+
+.refinement-textarea {
+  min-height: 140px;
 }
 
 .itinerary-list,
@@ -311,8 +407,12 @@
 
 @media (max-width: 1024px) {
   .planner-layout,
-  .results-section {
+  .thread-response-grid {
     grid-template-columns: 1fr;
+  }
+
+  .map-layer-list {
+    justify-content: flex-start;
   }
 
   .map-canvas {

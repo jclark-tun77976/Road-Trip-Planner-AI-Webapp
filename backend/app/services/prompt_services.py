@@ -1,4 +1,4 @@
-from app.models.trip_models import Profile
+from app.models.trip_models import ConversationTurn, Profile
 
 
 SYSTEM_PROMPT_TEMPLATE = """You are an AI road trip planner.
@@ -8,6 +8,7 @@ Keep the response clear, organized, and student-project appropriate.
 Build an ordered itinerary that can be mapped.
 Each trip stop should use a real, specific location string that can be geocoded.
 Include the final destination as the last trip stop.
+When a user asks for a refinement, update the previous plan coherently instead of ignoring prior context.
 """
 
 
@@ -16,28 +17,90 @@ def build_system_prompt(profile: Profile) -> str:
     ev_text = "Yes" if profile.is_ev else "No"
     public_water_text = "Yes" if profile.needs_public_water else "No"
     round_trip_text = "Yes" if profile.is_round_trip else "No"
+    travel_style_text = profile.travel_style.strip()
+
+    profile_lines = [
+        f"- Name: {profile.name}",
+        f"- Starting location: {profile.start_location}",
+        f"- Destination: {profile.destination}",
+        f"- Trip length: {profile.trip_length_value} {profile.trip_length_unit}",
+        f"- Round trip: {round_trip_text}",
+        f"- Vehicle type: {profile.vehicle_type}",
+        f"- EV vehicle: {ev_text}",
+        f"- Needs access to public water: {public_water_text}",
+    ]
+
+    if travel_style_text and travel_style_text.lower() != "none":
+        profile_lines.append(f"- Travel style: {travel_style_text}")
+
+    profile_lines.extend(
+        [
+            f"- Interests: {profile.interests}",
+            f"- Preferred stops: {stops_text}",
+        ]
+    )
 
     return f"""{SYSTEM_PROMPT_TEMPLATE}
 
 User profile:
-- Name: {profile.name}
-- Starting location: {profile.start_location}
-- Destination: {profile.destination}
-- Trip length: {profile.trip_length_value} {profile.trip_length_unit}
-- Round trip: {round_trip_text}
-- Vehicle type: {profile.vehicle_type}
-- EV vehicle: {ev_text}
-- Needs access to public water: {public_water_text}
-- Budget: {profile.budget}
-- Travel style: {profile.travel_style}
-- Interests: {profile.interests}
-- Preferred stops: {stops_text}
+{chr(10).join(profile_lines)}
 """
 
 
-def build_user_prompt(request: str) -> str:
-    return f"""Trip planning request:
+def _format_conversation_history(conversation_history: list[ConversationTurn]) -> str:
+    if not conversation_history:
+        return "No prior conversation history."
+
+    turns: list[str] = []
+
+    for turn in conversation_history:
+        recommendations = (
+            "\n".join(f"  - {item}" for item in turn.recommendations)
+            if turn.recommendations
+            else "  - None recorded"
+        )
+        trip_stops = (
+            "\n".join(
+                f"  - Day {stop.day}, stop {stop.order}: {stop.name} ({stop.location}) - {stop.reason}"
+                for stop in turn.trip_stops
+            )
+            if turn.trip_stops
+            else "  - No structured stops returned"
+        )
+
+        turns.append(
+            f"""Version {turn.version}
+User request:
+{turn.request}
+
+AI response summary:
+{turn.summary}
+
+AI recommendations:
+{recommendations}
+
+AI budget notes:
+{turn.budget_notes}
+
+AI trip stops:
+{trip_stops}"""
+        )
+
+    return "\n\n".join(turns)
+
+
+def build_user_prompt(request: str, conversation_history: list[ConversationTurn] | None = None) -> str:
+    history_text = _format_conversation_history(conversation_history or [])
+
+    return f"""Previous conversation history:
+{history_text}
+
+Latest user request:
 {request}
+
+If previous conversation history exists, treat the latest user request as a refinement of the existing trip unless the user explicitly asks to start over.
+Keep useful prior decisions that still fit the user's newest direction.
+Revise summary, recommendations, budget notes, and trip stops so they reflect the latest request.
 
 Return valid JSON with exactly these top-level keys:
 - summary
@@ -68,14 +131,19 @@ Rules:
   - reason
 - location must be a real-world place string suitable for Google Maps geocoding
 - order should increase from the start of the trip to the final destination
-- if Round trip is Yes, include the starting location again as the final stop
+- always include the profile destination somewhere in the ordered trip_stops
+- if Round trip is Yes, include the destination before returning to the starting location, and include the starting location again as the final stop
 - if Round trip is No, include the destination as the last stop
 """
 
 
-def build_full_prompt(profile: Profile, request: str) -> str:
+def build_full_prompt(
+    profile: Profile,
+    request: str,
+    conversation_history: list[ConversationTurn] | None = None,
+) -> str:
     system_prompt = build_system_prompt(profile)
-    user_prompt = build_user_prompt(request)
+    user_prompt = build_user_prompt(request, conversation_history)
     return f"""{system_prompt}
 
 {user_prompt}"""
