@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import ItineraryPanel from "./components/ItineraryPanel";
+import LocationAutocompleteInput from "./components/LocationAutocompleteInput";
 import TripMap from "./components/TripMap";
 import "./App.css";
 
@@ -21,6 +22,7 @@ const VEHICLE_TYPE_OPTIONS = [
 ];
 
 const TRIP_LENGTH_UNITS = ["hours", "days", "weeks"];
+const TRAVEL_STYLE_OPTIONS = ["none", "hotel", "camping", "RV sleeping"];
 
 const INITIAL_PROFILE = {
   name: "",
@@ -32,8 +34,7 @@ const INITIAL_PROFILE = {
   vehicle_type: "Sedan",
   is_ev: false,
   needs_public_water: false,
-  budget: "",
-  travel_style: "",
+  travel_style: "none",
   interests: "",
   stops: [""],
 };
@@ -62,8 +63,9 @@ function getInitialProfile() {
       vehicle_type: parsedProfile.vehicle_type ?? "Sedan",
       is_ev: parsedProfile.is_ev ?? false,
       needs_public_water: parsedProfile.needs_public_water ?? false,
-      budget: parsedProfile.budget ?? "",
-      travel_style: parsedProfile.travel_style ?? "",
+      travel_style: TRAVEL_STYLE_OPTIONS.includes(parsedProfile.travel_style)
+        ? parsedProfile.travel_style
+        : "none",
       interests: parsedProfile.interests ?? "",
       stops:
         Array.isArray(parsedProfile.stops) && parsedProfile.stops.length > 0
@@ -75,10 +77,24 @@ function getInitialProfile() {
   }
 }
 
+function buildConversationHistoryPayload(entries) {
+  return entries.map((entry) => ({
+    version: entry.version,
+    request: entry.request,
+    summary: entry.response.summary,
+    recommendations: entry.response.recommendations,
+    budget_notes: entry.response.budget_notes,
+    trip_stops: entry.response.trip_stops,
+  }));
+}
+
 function App() {
   const [profile, setProfile] = useState(getInitialProfile);
   const [request, setRequest] = useState("");
   const [response, setResponse] = useState(null);
+  const [responseHistory, setResponseHistory] = useState([]);
+  const [refinementRequest, setRefinementRequest] = useState("");
+  const [latestSubmittedRequest, setLatestSubmittedRequest] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingSeconds, setLoadingSeconds] = useState(0);
   const [error, setError] = useState("");
@@ -126,6 +142,13 @@ function App() {
     persistProfile(updatedProfile);
   }
 
+  function handleLocationFieldChange(fieldName, value) {
+    persistProfile({
+      ...profile,
+      [fieldName]: value,
+    });
+  }
+
   function addStopField() {
     const updatedProfile = {
       ...profile,
@@ -145,26 +168,33 @@ function App() {
   function clearProfile() {
     setProfile(INITIAL_PROFILE);
     setResponse(null);
+    setResponseHistory([]);
+    setRequest("");
+    setRefinementRequest("");
+    setLatestSubmittedRequest("");
     setError("");
     localStorage.removeItem("roadTripProfile");
   }
 
-  async function handleSubmit(event) {
-    event.preventDefault();
-
+  async function requestTripPlan(requestText, conversationHistory) {
     if (!profile.start_location.trim()) {
       setError("Starting Location is required.");
-      return;
+      return null;
     }
 
     if (!profile.destination.trim()) {
       setError("Destination is required.");
-      return;
+      return null;
     }
 
     if (!profile.trip_length_value) {
       setError("Trip length is required.");
-      return;
+      return null;
+    }
+
+    if (!requestText.trim()) {
+      setError("A trip request is required.");
+      return null;
     }
 
     setLoading(true);
@@ -183,7 +213,8 @@ function App() {
             trip_length_value: Number(profile.trip_length_value),
             stops: profile.stops.filter((stop) => stop.trim() !== ""),
           },
-          request,
+          request: requestText,
+          conversation_history: buildConversationHistoryPayload(conversationHistory),
         }),
       });
 
@@ -203,14 +234,58 @@ function App() {
       }
 
       const data = await res.json();
-      setResponse(data);
+      return data;
     } catch (err) {
       setError(err.message);
+      return null;
     } finally {
       setLoading(false);
       setLoadingSeconds(0);
     }
   }
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+
+    const requestText = request.trim();
+    const data = await requestTripPlan(requestText, []);
+    if (!data) {
+      return;
+    }
+
+    const nextEntry = {
+      version: 1,
+      request: requestText,
+      response: data,
+    };
+
+    setResponse(data);
+    setResponseHistory([nextEntry]);
+    setLatestSubmittedRequest(requestText);
+    setRefinementRequest("");
+  }
+
+  async function handleRefinementSubmit() {
+    const requestText = refinementRequest.trim();
+    const data = await requestTripPlan(requestText, responseHistory);
+    if (!data) {
+      return;
+    }
+
+    const nextEntry = {
+      version: responseHistory.length + 1,
+      request: requestText,
+      response: data,
+    };
+
+    setResponse(data);
+    setResponseHistory((previous) => [...previous, nextEntry]);
+    setLatestSubmittedRequest(requestText);
+    setRefinementRequest("");
+  }
+
+  const currentRequestPreview =
+    latestSubmittedRequest || request || "Your trip request will appear here.";
 
   return (
     <div className="page">
@@ -231,12 +306,9 @@ function App() {
           />
 
           <label className="label">Starting Location</label>
-          <input
-            className="input"
-            type="text"
-            name="start_location"
+          <LocationAutocompleteInput
             value={profile.start_location}
-            onChange={handleProfileChange}
+            onChange={(value) => handleLocationFieldChange("start_location", value)}
             placeholder="Philadelphia"
           />
 
@@ -273,12 +345,9 @@ function App() {
           </div>
 
           <label className="label">Destination</label>
-          <input
-            className="input"
-            type="text"
-            name="destination"
+          <LocationAutocompleteInput
             value={profile.destination}
-            onChange={handleProfileChange}
+            onChange={(value) => handleLocationFieldChange("destination", value)}
             placeholder="Pittsburgh"
           />
 
@@ -332,25 +401,19 @@ function App() {
             <span>Need access to public water</span>
           </label>
 
-          <label className="label">Budget</label>
-          <input
-            className="input"
-            type="text"
-            name="budget"
-            value={profile.budget}
-            onChange={handleProfileChange}
-            placeholder="low, medium, or high"
-          />
-
           <label className="label">Travel Style</label>
-          <input
+          <select
             className="input"
-            type="text"
             name="travel_style"
             value={profile.travel_style}
             onChange={handleProfileChange}
-            placeholder="scenic, relaxed, adventurous"
-          />
+          >
+            {TRAVEL_STYLE_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option === "none" ? "None" : option}
+              </option>
+            ))}
+          </select>
 
           <label className="label">Interests</label>
           <input
@@ -364,12 +427,10 @@ function App() {
 
           <label className="label">Stops (Optional)</label>
           {profile.stops.map((stop, index) => (
-            <input
+            <LocationAutocompleteInput
               key={index}
-              className="input"
-              type="text"
               value={stop}
-              onChange={(event) => handleStopChange(index, event.target.value)}
+              onChange={(value) => handleStopChange(index, value)}
               placeholder={`Stop ${index + 1}`}
             />
           ))}
@@ -395,6 +456,7 @@ function App() {
             startLocation={profile.start_location}
             onUseCurrentLocation={handleUseCurrentLocation}
             loading={loading}
+            profile={profile}
           />
 
           <div className="card trip-request-card">
@@ -418,7 +480,7 @@ function App() {
               {loading ? `Thinking... ${loadingSeconds}s` : "Submit"}
             </button>
 
-            {error && <p className="error-text">{error}</p>}
+            {!responseHistory.length && error && <p className="error-text">{error}</p>}
           </div>
         </div>
       </form>
@@ -426,50 +488,106 @@ function App() {
       <div className="card current-request-card">
         <h2>Current Request</h2>
         <div className="preview-box">
-          <p>{request || "Your trip request will appear here."}</p>
+          <p>{currentRequestPreview}</p>
         </div>
       </div>
 
-      {response && (
+      {responseHistory.length > 0 && (
         <section className="results-section">
-          <div className="result-card">
-            <div className="section-header">
-              <h3>Trip Overview</h3>
-              <p>{response.trip_stops.length} stops mapped</p>
-            </div>
-
-            <p>{response.summary}</p>
-
-            <h4>Recommendations</h4>
-            <ul>
-              {response.recommendations.map((item, index) => (
-                <li key={index}>{item}</li>
-              ))}
-            </ul>
-
-            <h4>Budget Notes</h4>
-            <p>{response.budget_notes}</p>
-
-            {response.tool_calling_used && response.tool_calling_summary && (
-              <div className="tooling-box">
-                <h4>Tool Calling</h4>
-                <p>{response.tool_calling_summary}</p>
+          {responseHistory.map((entry) => (
+            <article key={entry.version} className="thread-card">
+              <div className="thread-header">
+                <div>
+                  <p className="thread-label">
+                    {entry.version === 1
+                      ? "Initial Plan"
+                      : `Refinement ${entry.version - 1}`}
+                  </p>
+                  <h2>Version {entry.version}</h2>
+                </div>
+                <p>{entry.response.trip_stops.length} stops mapped</p>
               </div>
+
+              <div className="thread-request-box">
+                <h4>{entry.version === 1 ? "Original Request" : "Follow-up Request"}</h4>
+                <p>{entry.request}</p>
+              </div>
+
+              <div className="thread-response-grid">
+                <div className="result-card">
+                  <div className="section-header">
+                    <h3>Trip Overview</h3>
+                    <p>{entry.response.trip_stops.length} stops mapped</p>
+                  </div>
+
+                  <p>{entry.response.summary}</p>
+
+                  <h4>Recommendations</h4>
+                  <ul>
+                    {entry.response.recommendations.map((item, index) => (
+                      <li key={index}>{item}</li>
+                    ))}
+                  </ul>
+
+                  <h4>Budget Notes</h4>
+                  <p>{entry.response.budget_notes}</p>
+
+                  {entry.response.tool_calling_used &&
+                    entry.response.tool_calling_summary && (
+                      <div className="tooling-box">
+                        <h4>Tool Calling</h4>
+                        <p>{entry.response.tool_calling_summary}</p>
+                      </div>
+                    )}
+
+                  {entry.response.warnings?.length > 0 && (
+                    <div className="warning-box">
+                      <h4>Planning Notes</h4>
+                      <ul>
+                        {entry.response.warnings.map((warning, index) => (
+                          <li key={index}>{warning}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+
+                <ItineraryPanel response={entry.response} />
+              </div>
+            </article>
+          ))}
+
+          <div className="card refinement-card">
+            <h2>Refine This Plan</h2>
+            <p className="helper-text">
+              Ask for a shorter route, a different lodging style, extra detail, or any other revision.
+            </p>
+
+            <label className="label">Follow-up request</label>
+            <textarea
+              className="textarea refinement-textarea"
+              value={refinementRequest}
+              onChange={(event) => setRefinementRequest(event.target.value)}
+              placeholder="Example: Switch this to camping, shorten it to 3 days, and explain day 2 in more detail."
+            />
+
+            <p className="char-count">Character count: {refinementRequest.length}</p>
+
+            {loading && (
+              <p className="thinking-text">Refining... {loadingSeconds}s</p>
             )}
 
-            {response.warnings?.length > 0 && (
-              <div className="warning-box">
-                <h4>Planning Notes</h4>
-                <ul>
-                  {response.warnings.map((warning, index) => (
-                    <li key={index}>{warning}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
+            <button
+              type="button"
+              className="button"
+              onClick={handleRefinementSubmit}
+              disabled={loading}
+            >
+              {loading ? `Refining... ${loadingSeconds}s` : "Submit refinement"}
+            </button>
+
+            {responseHistory.length > 0 && error && <p className="error-text">{error}</p>}
           </div>
-
-          <ItineraryPanel response={response} />
         </section>
       )}
     </div>

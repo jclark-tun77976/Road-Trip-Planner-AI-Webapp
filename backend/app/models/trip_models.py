@@ -11,15 +11,9 @@ class Profile(BaseModel):
     vehicle_type: str
     is_ev: bool = False
     needs_public_water: bool = False
-    budget: str
     travel_style: str
     interests: str
     stops: list[str] = Field(default_factory=list)
-
-
-class TripRequest(BaseModel):
-    profile: Profile
-    request: str
 
 
 class Coordinate(BaseModel):
@@ -71,9 +65,24 @@ class GeneratedTripPlan(BaseModel):
     trip_stops: list[TripStop] = Field(default_factory=list)
 
 
+class ConversationTurn(BaseModel):
+    version: int = Field(ge=1)
+    request: str
+    summary: str
+    recommendations: list[str] = Field(default_factory=list)
+    budget_notes: str
+    trip_stops: list[TripStop] = Field(default_factory=list)
+
+
 class TripResponse(GeneratedTripPlan):
     route: RouteData | None = None
     warnings: list[str] = Field(default_factory=list)
     tool_calling_used: bool = False
     tool_calling_summary: str = ""
     prompt_used: str
+
+
+class TripRequest(BaseModel):
+    profile: Profile
+    request: str
+    conversation_history: list[ConversationTurn] = Field(default_factory=list)

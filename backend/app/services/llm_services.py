@@ -19,7 +19,11 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
         raise ValueError("GEMINI_API_KEY is not set in the environment.")
 
     client = genai.Client(api_key=api_key)
-    full_prompt = build_full_prompt(trip_request.profile, trip_request.request)
+    full_prompt = build_full_prompt(
+        trip_request.profile,
+        trip_request.request,
+        trip_request.conversation_history,
+    )
     tool_usage = {
         "used": False,
         "summary": "",

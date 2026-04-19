@@ -66,15 +66,27 @@ def build_fallback_trip_plan(summary_text: str, profile: Profile) -> GeneratedTr
 
 def build_fallback_stops(profile: Profile) -> list[TripStop]:
     requested_locations = [location.strip() for location in profile.stops if location.strip()]
-    final_location = profile.start_location if profile.is_round_trip else profile.destination
-    if not requested_locations or _normalize_location(requested_locations[-1]) != _normalize_location(final_location):
-        requested_locations.append(final_location)
+    destination_location = profile.destination.strip()
+    start_location = profile.start_location.strip()
+
+    if destination_location and (
+        not requested_locations
+        or _normalize_location(requested_locations[-1]) != _normalize_location(destination_location)
+    ):
+        requested_locations.append(destination_location)
+
+    if profile.is_round_trip and start_location and (
+        not requested_locations
+        or _normalize_location(requested_locations[-1]) != _normalize_location(start_location)
+    ):
+        requested_locations.append(start_location)
 
     total_days = _get_trip_length_days(profile)
     fallback_stops: list[TripStop] = []
 
     for index, location in enumerate(requested_locations, start=1):
-        is_destination = _normalize_location(location) == _normalize_location(final_location)
+        is_return_to_start = profile.is_round_trip and _normalize_location(location) == _normalize_location(start_location)
+        is_destination = _normalize_location(location) == _normalize_location(destination_location)
         fallback_stops.append(
             TripStop(
                 day=min(index, total_days),
@@ -82,9 +94,13 @@ def build_fallback_stops(profile: Profile) -> list[TripStop]:
                 name=location,
                 location=location,
                 reason=(
-                    "Final stop chosen from your trip profile."
-                    if is_destination
-                    else "Requested stop from your trip profile."
+                    "Return to your starting location to complete the round trip."
+                    if is_return_to_start
+                    else (
+                        "Destination chosen from your trip profile."
+                        if is_destination
+                        else "Requested stop from your trip profile."
+                    )
                 ),
             )
         )
@@ -159,8 +175,8 @@ def _sanitize_trip_stops(trip_stops: list[dict], profile: Profile) -> list[dict]
     sanitized: list[dict] = []
     trip_length_days = _get_trip_length_days(profile)
     normalized_start = _normalize_location(profile.start_location)
-    final_location = profile.start_location if profile.is_round_trip else profile.destination
-    normalized_destination = _normalize_location(final_location)
+    destination_location = profile.destination.strip()
+    normalized_destination = _normalize_location(destination_location)
 
     for stop in trip_stops:
         normalized_location = _normalize_location(stop["location"])
@@ -176,19 +192,32 @@ def _sanitize_trip_stops(trip_stops: list[dict], profile: Profile) -> list[dict]
         sanitized.append(stop)
 
     if normalized_destination:
-        if sanitized and _normalize_location(sanitized[-1]["location"]) == normalized_destination:
-            sanitized[-1]["name"] = final_location
-            sanitized[-1]["location"] = final_location
-        else:
+        has_destination = any(
+            _normalize_location(stop["location"]) == normalized_destination
+            for stop in sanitized
+        )
+
+        if not has_destination:
             sanitized.append(
                 {
                     "day": min(len(sanitized) + 1, trip_length_days),
                     "order": len(sanitized) + 1,
-                    "name": final_location,
-                    "location": final_location,
-                    "reason": "Final stop from your trip profile.",
+                    "name": destination_location,
+                    "location": destination_location,
+                    "reason": "Destination chosen from your trip profile.",
                 }
             )
+
+    if profile.is_round_trip and normalized_start:
+        sanitized.append(
+            {
+                "day": min(len(sanitized) + 1, trip_length_days),
+                "order": len(sanitized) + 1,
+                "name": profile.start_location,
+                "location": profile.start_location,
+                "reason": "Return to your starting location to complete the round trip.",
+            }
+        )
 
     for index, stop in enumerate(sanitized, start=1):
         stop["order"] = index
