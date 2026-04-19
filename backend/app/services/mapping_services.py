@@ -186,6 +186,81 @@ def decode_polyline(encoded_polyline: str) -> list[Coordinate]:
     return coordinates
 
 
+def get_route_tool_context(
+    start_location: str,
+    destination: str,
+    stop_locations: list[str],
+    vehicle_type: str,
+    is_round_trip: bool = False,
+) -> dict:
+    """Return Google Maps route facts for an ordered trip itinerary.
+
+    Args:
+        start_location: Starting point for the trip.
+        destination: Final destination for the trip when not returning home.
+        stop_locations: Ordered list of intermediate stop locations selected by the model.
+        vehicle_type: Vehicle type chosen by the user.
+        is_round_trip: Whether the trip should end back at the starting location.
+
+    Returns:
+        A JSON-serializable dictionary with route totals, leg summaries, and warnings.
+    """
+    cleaned_stop_locations = [
+        location.strip()
+        for location in stop_locations
+        if _is_geocodable_location(location)
+    ]
+    final_destination = start_location if is_round_trip else destination
+    synthetic_stops = [
+        TripStop(
+            day=1,
+            order=index,
+            name=location,
+            location=location,
+            reason="Tool-generated route stop.",
+        )
+        for index, location in enumerate(cleaned_stop_locations, start=1)
+    ]
+
+    try:
+        route_data, _, warnings = build_route_data(
+            start_location=start_location,
+            destination=final_destination,
+            trip_stops=synthetic_stops,
+            vehicle_type=vehicle_type,
+        )
+    except Exception as exc:
+        return {
+            "route_available": False,
+            "final_destination": final_destination,
+            "warnings": [f"Route lookup failed: {exc}"],
+        }
+
+    if route_data is None:
+        return {
+            "route_available": False,
+            "final_destination": final_destination,
+            "warnings": warnings,
+        }
+
+    leg_summaries = [
+        (
+            f"Leg {leg.order}: {leg.from_name} to {leg.to_name}, "
+            f"{leg.distance_km} km, {leg.duration_minutes} min"
+        )
+        for leg in route_data.legs
+    ]
+
+    return {
+        "route_available": True,
+        "final_destination": final_destination,
+        "total_distance_km": route_data.total_distance_km,
+        "total_duration_minutes": route_data.total_duration_minutes,
+        "leg_summaries": leg_summaries,
+        "warnings": warnings,
+    }
+
+
 def _decode_value(encoded_polyline: str, index: int) -> tuple[int, int]:
     result = 0
     shift = 0
