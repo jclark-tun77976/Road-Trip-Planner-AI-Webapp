@@ -74,4 +74,6 @@ class GeneratedTripPlan(BaseModel):
 class TripResponse(GeneratedTripPlan):
     route: RouteData | None = None
     warnings: list[str] = Field(default_factory=list)
+    tool_calling_used: bool = False
+    tool_calling_summary: str = ""
     prompt_used: str

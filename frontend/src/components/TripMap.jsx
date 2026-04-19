@@ -1,9 +1,13 @@
+/* global __GOOGLE_MAPS_API_KEY__ */
+
 import { useEffect, useRef, useState } from "react";
 
 
 const GOOGLE_MAPS_API_KEY = __GOOGLE_MAPS_API_KEY__;
 let googleMapsPromise = null;
 const GOOGLE_MAPS_CALLBACK_NAME = "__initRoadTripGoogleMaps";
+const UNITED_STATES_CENTER = { lat: 39.8283, lng: -98.5795 };
+const UNITED_STATES_ZOOM = 4;
 
 
 function loadGoogleMaps() {
@@ -68,12 +72,94 @@ function getMarkerLabel(waypoint, index, waypointCount) {
 }
 
 
-function TripMap({ route }) {
+function TripMap({ route, startLocation, onUseCurrentLocation, loading }) {
   const mapElementRef = useRef(null);
   const mapRef = useRef(null);
+  const mapsRef = useRef(null);
+  const geocoderRef = useRef(null);
   const markersRef = useRef([]);
   const polylineRef = useRef(null);
+  const currentLocationMarkerRef = useRef(null);
   const [mapError, setMapError] = useState("");
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [locationError, setLocationError] = useState("");
+  const [currentLocation, setCurrentLocation] = useState(null);
+
+  function clearMapOverlays() {
+    markersRef.current.forEach((marker) => marker.setMap(null));
+    markersRef.current = [];
+
+    if (polylineRef.current) {
+      polylineRef.current.setMap(null);
+      polylineRef.current = null;
+    }
+
+    if (currentLocationMarkerRef.current) {
+      currentLocationMarkerRef.current.setMap(null);
+      currentLocationMarkerRef.current = null;
+    }
+  }
+
+  async function reverseGeocodeCurrentLocation(coords) {
+    const maps = mapsRef.current ?? (await loadGoogleMaps());
+    const geocoder = geocoderRef.current ?? new maps.Geocoder();
+    geocoderRef.current = geocoder;
+
+    return new Promise((resolve, reject) => {
+      geocoder.geocode({ location: coords }, (results, status) => {
+        if (status === "OK" && results?.[0]?.formatted_address) {
+          resolve(results[0].formatted_address);
+          return;
+        }
+
+        reject(new Error("Could not determine a readable address for your location."));
+      });
+    });
+  }
+
+  async function handleUseCurrentLocation() {
+    if (!navigator.geolocation) {
+      setLocationError("This browser does not support location access.");
+      return;
+    }
+
+    setLocationLoading(true);
+    setLocationError("");
+
+    navigator.geolocation.getCurrentPosition(
+      async ({ coords }) => {
+        const nextLocation = {
+          lat: coords.latitude,
+          lng: coords.longitude,
+        };
+
+        setCurrentLocation(nextLocation);
+
+        try {
+          const formattedAddress = await reverseGeocodeCurrentLocation(nextLocation);
+          onUseCurrentLocation?.(formattedAddress);
+        } catch {
+          onUseCurrentLocation?.(
+            `${coords.latitude.toFixed(5)}, ${coords.longitude.toFixed(5)}`,
+          );
+        } finally {
+          setLocationLoading(false);
+        }
+      },
+      (error) => {
+        const message =
+          error.code === error.PERMISSION_DENIED
+            ? "Location access was denied."
+            : "Unable to get your current location.";
+        setLocationError(message);
+        setLocationLoading(false);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+      },
+    );
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -84,29 +170,44 @@ function TripMap({ route }) {
           return;
         }
 
+        mapsRef.current = maps;
+
         if (!mapRef.current) {
           mapRef.current = new maps.Map(mapElementRef.current, {
-            center: { lat: 39.8283, lng: -98.5795 },
-            zoom: 4,
+            center: UNITED_STATES_CENTER,
+            zoom: UNITED_STATES_ZOOM,
             mapTypeControl: false,
             streetViewControl: false,
             fullscreenControl: false,
           });
         }
 
+        if (!geocoderRef.current) {
+          geocoderRef.current = new maps.Geocoder();
+        }
+
         setMapError("");
 
-        markersRef.current.forEach((marker) => marker.setMap(null));
-        markersRef.current = [];
-
-        if (polylineRef.current) {
-          polylineRef.current.setMap(null);
-          polylineRef.current = null;
-        }
-
         if (!route || route.waypoints.length === 0) {
+          clearMapOverlays();
+
+          if (currentLocation) {
+            currentLocationMarkerRef.current = new maps.Marker({
+              map: mapRef.current,
+              position: currentLocation,
+              title: "Current location",
+            });
+            mapRef.current.setCenter(currentLocation);
+            mapRef.current.setZoom(9);
+            return;
+          }
+
+          mapRef.current.setCenter(UNITED_STATES_CENTER);
+          mapRef.current.setZoom(UNITED_STATES_ZOOM);
           return;
         }
+
+        clearMapOverlays();
 
         const bounds = new maps.LatLngBounds();
 
@@ -164,12 +265,19 @@ function TripMap({ route }) {
     return () => {
       cancelled = true;
     };
-  }, [route]);
+  }, [currentLocation, route]);
 
   return (
-    <div className="result-card map-card">
+    <div className="card map-card">
       <div className="section-header">
-        <h3>Trip Map</h3>
+        <div>
+          <h2>Trip Map</h2>
+          <p className="helper-text">
+            {route
+              ? "The latest AI route is drawn on this map."
+              : "Starts with a United States overview and updates in place."}
+          </p>
+        </div>
         {route && (
           <p>
             {route.total_distance_km} km • {route.total_duration_minutes} min
@@ -177,13 +285,29 @@ function TripMap({ route }) {
         )}
       </div>
 
-      {mapError ? (
-        <p className="status-message error-text">{mapError}</p>
-      ) : route ? (
-        <div ref={mapElementRef} className="map-canvas" />
-      ) : (
-        <p className="status-message">Route data is not available for this itinerary yet.</p>
-      )}
+      {mapError && <p className="status-message error-text">{mapError}</p>}
+      <div ref={mapElementRef} className="map-canvas" />
+
+      <div className="map-toolbar">
+        <p className="status-message">
+          {route
+            ? "Submitting a new trip keeps this map in place and redraws the route."
+            : startLocation
+              ? `Starting location: ${startLocation}`
+              : "Set a starting location manually or use your current location."}
+        </p>
+
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={handleUseCurrentLocation}
+          disabled={locationLoading || loading}
+        >
+          {locationLoading ? "Finding your location..." : "Use my location"}
+        </button>
+      </div>
+
+      {locationError && <p className="status-message error-text">{locationError}</p>}
     </div>
   );
 }

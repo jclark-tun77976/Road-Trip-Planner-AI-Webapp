@@ -49,6 +49,12 @@ Do not add markdown fences.
 Do not add explanation before or after the JSON.
 Use snake_case keys exactly as written.
 
+Tool use:
+- You have access to a tool named get_route_context.
+- Use get_route_context when you need accurate route distance, duration, or leg order grounded in Google Maps data.
+- For road trip planning requests, you should usually call it once after selecting the ordered stop locations.
+- Use the tool result to improve summary, recommendation, and budget guidance with realistic travel context.
+
 Rules:
 - summary: one short paragraph string
 - recommendations: array of 3 short strings

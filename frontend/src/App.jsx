@@ -38,45 +38,58 @@ const INITIAL_PROFILE = {
   stops: [""],
 };
 
-function App() {
-  const [profile, setProfile] = useState(INITIAL_PROFILE);
+function getInitialProfile() {
+  if (typeof window === "undefined") {
+    return INITIAL_PROFILE;
+  }
 
+  const savedProfile = window.localStorage.getItem("roadTripProfile");
+  if (!savedProfile) {
+    return INITIAL_PROFILE;
+  }
+
+  try {
+    const parsedProfile = JSON.parse(savedProfile);
+    return {
+      ...INITIAL_PROFILE,
+      name: parsedProfile.name ?? "",
+      start_location: parsedProfile.start_location ?? "",
+      destination: parsedProfile.destination ?? "",
+      trip_length_value:
+        parsedProfile.trip_length_value ?? parsedProfile.trip_length_days ?? "",
+      trip_length_unit: parsedProfile.trip_length_unit ?? "days",
+      is_round_trip: parsedProfile.is_round_trip ?? false,
+      vehicle_type: parsedProfile.vehicle_type ?? "Sedan",
+      is_ev: parsedProfile.is_ev ?? false,
+      needs_public_water: parsedProfile.needs_public_water ?? false,
+      budget: parsedProfile.budget ?? "",
+      travel_style: parsedProfile.travel_style ?? "",
+      interests: parsedProfile.interests ?? "",
+      stops:
+        Array.isArray(parsedProfile.stops) && parsedProfile.stops.length > 0
+          ? parsedProfile.stops
+          : [""],
+    };
+  } catch {
+    return INITIAL_PROFILE;
+  }
+}
+
+function App() {
+  const [profile, setProfile] = useState(getInitialProfile);
   const [request, setRequest] = useState("");
   const [response, setResponse] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadingSeconds, setLoadingSeconds] = useState(0);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    const savedProfile = localStorage.getItem("roadTripProfile");
-    if (savedProfile) {
-      const parsedProfile = JSON.parse(savedProfile);
-      setProfile({
-        ...INITIAL_PROFILE,
-        name: parsedProfile.name ?? "",
-        start_location: parsedProfile.start_location ?? "",
-        destination: parsedProfile.destination ?? "",
-        trip_length_value:
-          parsedProfile.trip_length_value ?? parsedProfile.trip_length_days ?? "",
-        trip_length_unit: parsedProfile.trip_length_unit ?? "days",
-        is_round_trip: parsedProfile.is_round_trip ?? false,
-        vehicle_type: parsedProfile.vehicle_type ?? "Sedan",
-        is_ev: parsedProfile.is_ev ?? false,
-        needs_public_water: parsedProfile.needs_public_water ?? false,
-        budget: parsedProfile.budget ?? "",
-        travel_style: parsedProfile.travel_style ?? "",
-        interests: parsedProfile.interests ?? "",
-        stops:
-          Array.isArray(parsedProfile.stops) && parsedProfile.stops.length > 0
-            ? parsedProfile.stops
-            : [""],
-      });
-    }
-  }, []);
+  function persistProfile(updatedProfile) {
+    setProfile(updatedProfile);
+    localStorage.setItem("roadTripProfile", JSON.stringify(updatedProfile));
+  }
 
   useEffect(() => {
     if (!loading) {
-      setLoadingSeconds(0);
       return undefined;
     }
 
@@ -84,8 +97,6 @@ function App() {
     const intervalId = window.setInterval(() => {
       setLoadingSeconds(Math.floor((Date.now() - startedAt) / 1000) + 1);
     }, 1000);
-
-    setLoadingSeconds(1);
 
     return () => {
       window.clearInterval(intervalId);
@@ -99,8 +110,7 @@ function App() {
       [name]: type === "checkbox" ? checked : value,
     };
 
-    setProfile(updatedProfile);
-    localStorage.setItem("roadTripProfile", JSON.stringify(updatedProfile));
+    persistProfile(updatedProfile);
   }
 
   function handleStopChange(index, value) {
@@ -113,8 +123,7 @@ function App() {
       stops: updatedStops,
     };
 
-    setProfile(updatedProfile);
-    localStorage.setItem("roadTripProfile", JSON.stringify(updatedProfile));
+    persistProfile(updatedProfile);
   }
 
   function addStopField() {
@@ -123,12 +132,20 @@ function App() {
       stops: [...profile.stops, ""],
     };
 
-    setProfile(updatedProfile);
-    localStorage.setItem("roadTripProfile", JSON.stringify(updatedProfile));
+    persistProfile(updatedProfile);
+  }
+
+  function handleUseCurrentLocation(location) {
+    persistProfile({
+      ...profile,
+      start_location: location,
+    });
   }
 
   function clearProfile() {
     setProfile(INITIAL_PROFILE);
+    setResponse(null);
+    setError("");
     localStorage.removeItem("roadTripProfile");
   }
 
@@ -151,6 +168,7 @@ function App() {
     }
 
     setLoading(true);
+    setLoadingSeconds(1);
     setError("");
 
     try {
@@ -190,6 +208,7 @@ function App() {
       setError(err.message);
     } finally {
       setLoading(false);
+      setLoadingSeconds(0);
     }
   }
 
@@ -197,8 +216,8 @@ function App() {
     <div className="page">
       <h1 className="title">Road Trip Planner AI</h1>
 
-      <form className="container" onSubmit={handleSubmit}>
-        <div className="card">
+      <form className="planner-layout" onSubmit={handleSubmit}>
+        <div className="card profile-card">
           <h2>User Profile</h2>
 
           <label className="label">Name</label>
@@ -210,7 +229,7 @@ function App() {
             onChange={handleProfileChange}
             placeholder="Enter your name"
           />
-          
+
           <label className="label">Starting Location</label>
           <input
             className="input"
@@ -370,35 +389,46 @@ function App() {
           </button>
         </div>
 
-        <div className="card">
-          <h2>Trip Request</h2>
-
-          <label className="label">What do you want help with?</label>
-          <textarea
-            className="textarea"
-            value={request}
-            onChange={(event) => setRequest(event.target.value)}
-            placeholder="Example: Plan me a 5-day scenic road trip with cheap hotels and good food stops."
+        <div className="content-column">
+          <TripMap
+            route={response?.route ?? null}
+            startLocation={profile.start_location}
+            onUseCurrentLocation={handleUseCurrentLocation}
+            loading={loading}
           />
 
-          <p className="char-count">Character count: {request.length}</p>
+          <div className="card trip-request-card">
+            <h2>Trip Request</h2>
 
-          {loading && (
-            <p className="thinking-text">Thinking... {loadingSeconds}s</p>
-          )}
+            <label className="label">What do you want help with?</label>
+            <textarea
+              className="textarea"
+              value={request}
+              onChange={(event) => setRequest(event.target.value)}
+              placeholder="Example: Plan me a 5-day scenic road trip with cheap hotels and good food stops."
+            />
 
-          <button type="submit" className="button" disabled={loading}>
-            {loading ? `Thinking... ${loadingSeconds}s` : "Submit"}
-          </button>
+            <p className="char-count">Character count: {request.length}</p>
 
-          <div className="preview-box">
-            <h3>Current Request</h3>
-            <p>{request || "Your trip request will appear here."}</p>
+            {loading && (
+              <p className="thinking-text">Thinking... {loadingSeconds}s</p>
+            )}
+
+            <button type="submit" className="button" disabled={loading}>
+              {loading ? `Thinking... ${loadingSeconds}s` : "Submit"}
+            </button>
 
             {error && <p className="error-text">{error}</p>}
           </div>
         </div>
       </form>
+
+      <div className="card current-request-card">
+        <h2>Current Request</h2>
+        <div className="preview-box">
+          <p>{request || "Your trip request will appear here."}</p>
+        </div>
+      </div>
 
       {response && (
         <section className="results-section">
@@ -420,6 +450,13 @@ function App() {
             <h4>Budget Notes</h4>
             <p>{response.budget_notes}</p>
 
+            {response.tool_calling_used && response.tool_calling_summary && (
+              <div className="tooling-box">
+                <h4>Tool Calling</h4>
+                <p>{response.tool_calling_summary}</p>
+              </div>
+            )}
+
             {response.warnings?.length > 0 && (
               <div className="warning-box">
                 <h4>Planning Notes</h4>
@@ -432,7 +469,6 @@ function App() {
             )}
           </div>
 
-          <TripMap route={response.route} />
           <ItineraryPanel response={response} />
         </section>
       )}
