@@ -31,6 +31,14 @@ class TripStop(BaseModel):
     longitude: float | None = None
 
 
+class RoadsideOption(BaseModel):
+    name: str
+    location: str
+    category: str
+    reason: str
+    rating: float | None = None
+
+
 class RouteWaypoint(BaseModel):
     order: int = Field(ge=1)
     name: str
@@ -63,6 +71,7 @@ class GeneratedTripPlan(BaseModel):
     recommendations: list[str] = Field(default_factory=list)
     budget_notes: str
     trip_stops: list[TripStop] = Field(default_factory=list)
+    roadside_options: list[RoadsideOption] = Field(default_factory=list)
 
 
 class ConversationTurn(BaseModel):
@@ -72,6 +81,7 @@ class ConversationTurn(BaseModel):
     recommendations: list[str] = Field(default_factory=list)
     budget_notes: str
     trip_stops: list[TripStop] = Field(default_factory=list)
+    roadside_options: list[RoadsideOption] = Field(default_factory=list)
 
 
 class TripResponse(GeneratedTripPlan):
