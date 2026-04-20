@@ -5,7 +5,12 @@ from google import genai
 from google.genai import types
 
 from app.models.trip_models import TripRequest, TripResponse
-from app.services.mapping_services import build_route_data, get_route_tool_context
+from app.services.mapping_services import (
+    build_route_data,
+    get_roadside_suggestions_for_route,
+    get_roadside_tool_context,
+    get_route_tool_context,
+)
 from app.services.prompt_services import build_full_prompt
 from app.services.trip_parser import parse_trip_plan
 
@@ -25,8 +30,11 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
         trip_request.conversation_history,
     )
     tool_usage = {
-        "used": False,
-        "summary": "",
+        "summaries": [],
+    }
+    roadside_tool_result = {
+        "suggestions": [],
+        "warnings": [],
     }
 
     def get_route_context(
@@ -55,22 +63,55 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
             vehicle_type=vehicle_type,
             is_round_trip=is_round_trip,
         )
-        tool_usage["used"] = True
+        tool_usage["summaries"].append(
+            "Gemini used the Google Maps route tool."
+        )
         if result.get("route_available"):
-            tool_usage["summary"] = (
+            tool_usage["summaries"][-1] = (
                 "Gemini used the Google Maps route tool "
                 f"for {len(stop_locations)} planned stops, "
                 f"{result.get('total_distance_km', 0)} km total."
             )
         else:
-            tool_usage["summary"] = "Gemini attempted the Google Maps route tool, but route facts were unavailable."
+            tool_usage["summaries"][-1] = (
+                "Gemini attempted the Google Maps route tool, but route facts were unavailable."
+            )
+        return result
+
+    def get_roadside_options(
+        start_location: str,
+        destination: str,
+        stop_locations: list[str],
+        vehicle_type: str,
+        is_round_trip: bool = False,
+    ) -> dict:
+        result = get_roadside_tool_context(
+            start_location=start_location,
+            destination=destination,
+            stop_locations=stop_locations,
+            vehicle_type=vehicle_type,
+            is_round_trip=is_round_trip,
+        )
+        roadside_tool_result["suggestions"] = result.get("suggestions", [])
+        roadside_tool_result["warnings"] = result.get("warnings", [])
+
+        if result.get("suggestions_available"):
+            tool_usage["summaries"].append(
+                "Gemini used the roadside attractions tool "
+                f"and found {len(result.get('suggestions', []))} optional stops."
+            )
+        else:
+            tool_usage["summaries"].append(
+                "Gemini attempted the roadside attractions tool, but no suggestions were available."
+            )
+
         return result
 
     response = client.models.generate_content(
         model="gemini-2.5-flash-lite",
         contents=full_prompt,
         config=types.GenerateContentConfig(
-            tools=[get_route_context],
+            tools=[get_route_context, get_roadside_options],
             toolConfig=types.ToolConfig(
                 functionCallingConfig=types.FunctionCallingConfig(
                     mode=types.FunctionCallingConfigMode.AUTO,
@@ -83,6 +124,8 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
     route = None
     enriched_stops = generated_plan.trip_stops
     route_warnings: list[str] = []
+    roadside_warnings: list[str] = roadside_tool_result["warnings"]
+    roadside_options = generated_plan.roadside_options
 
     try:
         route, enriched_stops, route_warnings = build_route_data(
@@ -98,14 +141,22 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
     except Exception as exc:
         route_warnings.append(f"Google Maps route data is unavailable right now: {exc}")
 
+    if not roadside_options and route is not None:
+        try:
+            roadside_options, generated_roadside_warnings = get_roadside_suggestions_for_route(route)
+            roadside_warnings.extend(generated_roadside_warnings)
+        except Exception as exc:
+            roadside_warnings.append(f"Roadside attraction suggestions are unavailable right now: {exc}")
+
     return TripResponse(
         summary=generated_plan.summary,
         recommendations=generated_plan.recommendations,
         budget_notes=generated_plan.budget_notes,
         trip_stops=enriched_stops,
+        roadside_options=roadside_options,
         route=route,
-        warnings=warnings + route_warnings,
-        tool_calling_used=tool_usage["used"],
-        tool_calling_summary=tool_usage["summary"],
+        warnings=warnings + route_warnings + roadside_warnings,
+        tool_calling_used=bool(tool_usage["summaries"]),
+        tool_calling_summary=" ".join(tool_usage["summaries"]),
         prompt_used=full_prompt,
     )

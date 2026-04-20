@@ -2,12 +2,16 @@ import os
 
 import httpx
 
-from app.models.trip_models import Coordinate, RouteData, RouteLeg, RouteWaypoint, TripStop
+from app.models.trip_models import Coordinate, RoadsideOption, RouteData, RouteLeg, RouteWaypoint, TripStop
 
 
 GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 DIRECTIONS_URL = "https://maps.googleapis.com/maps/api/directions/json"
+PLACES_NEARBY_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
 REQUEST_TIMEOUT = 20.0
+ROADISDE_SAMPLE_POINTS = 5
+ROADSIDE_SEARCH_RADIUS_METERS = 15000
+MAX_ROADSIDE_OPTIONS = 5
 PLACEHOLDER_LOCATIONS = {
     "",
     "your starting location here",
@@ -16,6 +20,24 @@ PLACEHOLDER_LOCATIONS = {
     "final destination",
     "destination",
 }
+
+ROADSIDE_SEARCH_PROFILES = [
+    {
+        "label": "Roadside attraction",
+        "type": "tourist_attraction",
+        "keyword": "roadside attraction",
+    },
+    {
+        "label": "Odd museum",
+        "type": "museum",
+        "keyword": "odd museum",
+    },
+    {
+        "label": "Giant roadside art",
+        "type": "tourist_attraction",
+        "keyword": "giant statue",
+    },
+]
 
 
 class GoogleMapsConfigurationError(ValueError):
@@ -261,6 +283,135 @@ def get_route_tool_context(
     }
 
 
+def get_roadside_tool_context(
+    start_location: str,
+    destination: str,
+    stop_locations: list[str],
+    vehicle_type: str,
+    is_round_trip: bool = False,
+) -> dict:
+    """Return optional roadside attraction suggestions along the route."""
+    cleaned_stop_locations = [
+        location.strip()
+        for location in stop_locations
+        if _is_geocodable_location(location)
+    ]
+    final_destination = start_location if is_round_trip else destination
+    synthetic_stops = [
+        TripStop(
+            day=1,
+            order=index,
+            name=location,
+            location=location,
+            reason="Tool-generated route stop.",
+        )
+        for index, location in enumerate(cleaned_stop_locations, start=1)
+    ]
+
+    try:
+        route_data, _, route_warnings = build_route_data(
+            start_location=start_location,
+            destination=final_destination,
+            trip_stops=synthetic_stops,
+            vehicle_type=vehicle_type,
+        )
+    except Exception as exc:
+        return {
+            "suggestions_available": False,
+            "suggestions": [],
+            "warnings": [f"Roadside lookup failed: {exc}"],
+        }
+
+    if route_data is None:
+        return {
+            "suggestions_available": False,
+            "suggestions": [],
+            "warnings": route_warnings,
+        }
+
+    try:
+        suggestions, suggestion_warnings = get_roadside_suggestions_for_route(route_data)
+    except Exception as exc:
+        return {
+            "suggestions_available": False,
+            "suggestions": [],
+            "warnings": route_warnings + [f"Roadside lookup failed: {exc}"],
+        }
+
+    return {
+        "suggestions_available": bool(suggestions),
+        "suggestions": [suggestion.model_dump() for suggestion in suggestions],
+        "warnings": route_warnings + suggestion_warnings,
+    }
+
+
+def get_roadside_suggestions_for_route(route_data: RouteData) -> tuple[list[RoadsideOption], list[str]]:
+    api_key = os.getenv("GOOGLE_MAPS_API_KEY")
+    if not api_key:
+        raise ValueError("GOOGLE_MAPS_API_KEY is not set in the environment.")
+
+    warnings: list[str] = []
+    suggestion_lookup: dict[str, RoadsideOption] = {}
+    sampled_points = _sample_route_points(route_data)
+
+    if not sampled_points:
+        return [], ["No route points were available for roadside suggestions."]
+
+    with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+        for sampled_point in sampled_points:
+            for profile in ROADSIDE_SEARCH_PROFILES:
+                response = client.get(
+                    PLACES_NEARBY_URL,
+                    params={
+                        "location": _to_lat_lng_string(sampled_point.latitude, sampled_point.longitude),
+                        "radius": ROADSIDE_SEARCH_RADIUS_METERS,
+                        "type": profile["type"],
+                        "keyword": profile["keyword"],
+                        "key": api_key,
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+                status = payload.get("status", "Unknown Places error")
+
+                if status == "REQUEST_DENIED":
+                    raise GoogleMapsConfigurationError(
+                        "Google Places API returned REQUEST_DENIED. "
+                        "Enable Places API and allow this key for backend/server requests."
+                    )
+
+                if status not in {"OK", "ZERO_RESULTS"}:
+                    warnings.append(f"Roadside search returned {status}.")
+                    continue
+
+                for place in payload.get("results", []):
+                    place_id = place.get("place_id")
+                    if not place_id or place_id in suggestion_lookup:
+                        continue
+
+                    name = str(place.get("name", "")).strip()
+                    location = str(place.get("vicinity") or "").strip()
+                    if not name or not location:
+                        continue
+
+                    rating = place.get("rating")
+                    suggestion_lookup[place_id] = RoadsideOption(
+                        name=name,
+                        location=location,
+                        category=_categorize_roadside_place(place, profile["label"]),
+                        reason=_build_roadside_reason(profile["label"], rating),
+                        rating=float(rating) if isinstance(rating, (int, float)) else None,
+                    )
+
+    suggestions = sorted(
+        suggestion_lookup.values(),
+        key=lambda suggestion: suggestion.rating if suggestion.rating is not None else 0,
+        reverse=True,
+    )[:MAX_ROADSIDE_OPTIONS]
+
+    return suggestions, warnings
+
+
 def _decode_value(encoded_polyline: str, index: int) -> tuple[int, int]:
     result = 0
     shift = 0
@@ -359,6 +510,53 @@ def _resolve_travel_mode(vehicle_type: str) -> str:
 
 def _to_lat_lng_string(latitude: float, longitude: float) -> str:
     return f"{latitude},{longitude}"
+
+
+def _sample_route_points(route_data: RouteData) -> list[Coordinate]:
+    source_points = route_data.geometry or [
+        Coordinate(latitude=waypoint.latitude, longitude=waypoint.longitude)
+        for waypoint in route_data.waypoints
+    ]
+
+    if len(source_points) <= ROADISDE_SAMPLE_POINTS:
+        return source_points
+
+    step = (len(source_points) - 1) / (ROADISDE_SAMPLE_POINTS - 1)
+    sampled_points = [
+        source_points[round(index * step)]
+        for index in range(ROADISDE_SAMPLE_POINTS)
+    ]
+
+    deduped_points: list[Coordinate] = []
+    seen: set[str] = set()
+
+    for point in sampled_points:
+        point_key = f"{point.latitude:.4f},{point.longitude:.4f}"
+        if point_key in seen:
+            continue
+        seen.add(point_key)
+        deduped_points.append(point)
+
+    return deduped_points
+
+
+def _categorize_roadside_place(place: dict, fallback_label: str) -> str:
+    place_types = place.get("types", [])
+
+    if "museum" in place_types:
+        return "Museum"
+
+    if "tourist_attraction" in place_types:
+        return "Roadside attraction"
+
+    return fallback_label
+
+
+def _build_roadside_reason(profile_label: str, rating: object) -> str:
+    if isinstance(rating, (int, float)):
+        return f"{profile_label} near the route with a Google rating of {float(rating):.1f}."
+
+    return f"{profile_label} near the route worth considering as an optional stop."
 
 
 def _normalize_location(location: str) -> str:

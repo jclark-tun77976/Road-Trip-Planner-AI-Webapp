@@ -85,6 +85,7 @@ function buildConversationHistoryPayload(entries) {
     recommendations: entry.response.recommendations,
     budget_notes: entry.response.budget_notes,
     trip_stops: entry.response.trip_stops,
+    roadside_options: entry.response.roadside_options ?? [],
   }));
 }
 
@@ -531,6 +532,19 @@ function App() {
 
                   <h4>Budget Notes</h4>
                   <p>{entry.response.budget_notes}</p>
+
+                  {entry.response.roadside_options?.length > 0 && (
+                    <>
+                      <h4>Cool Roadside Options</h4>
+                      <ul>
+                        {entry.response.roadside_options.map((option, index) => (
+                          <li key={`${option.name}-${index}`}>
+                            <strong>{option.name}</strong>: {option.location} ({option.category}) - {option.reason}
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
 
                   {entry.response.tool_calling_used &&
                     entry.response.tool_calling_summary && (

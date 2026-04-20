@@ -263,6 +263,31 @@
   margin: 0;
 }
 
+.collapse-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.collapse-toggle .section-header {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.collapse-icon {
+  color: #cbd5e1;
+  font-size: 18px;
+  line-height: 1;
+}
+
 .map-card {
   display: flex;
   flex-direction: column;

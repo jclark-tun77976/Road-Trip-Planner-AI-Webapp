@@ -67,6 +67,14 @@ def _format_conversation_history(conversation_history: list[ConversationTurn]) -
             if turn.trip_stops
             else "  - No structured stops returned"
         )
+        roadside_options = (
+            "\n".join(
+                f"  - {option.name} ({option.location}) [{option.category}] - {option.reason}"
+                for option in turn.roadside_options
+            )
+            if turn.roadside_options
+            else "  - No roadside options returned"
+        )
 
         turns.append(
             f"""Version {turn.version}
@@ -83,7 +91,10 @@ AI budget notes:
 {turn.budget_notes}
 
 AI trip stops:
-{trip_stops}"""
+{trip_stops}
+
+AI roadside options:
+{roadside_options}"""
         )
 
     return "\n\n".join(turns)
@@ -101,12 +112,14 @@ Latest user request:
 If previous conversation history exists, treat the latest user request as a refinement of the existing trip unless the user explicitly asks to start over.
 Keep useful prior decisions that still fit the user's newest direction.
 Revise summary, recommendations, budget notes, and trip stops so they reflect the latest request.
+If useful, include optional roadside attraction ideas that fit the route.
 
 Return valid JSON with exactly these top-level keys:
 - summary
 - recommendations
 - budget_notes
 - trip_stops
+- roadside_options
 
 Do not add markdown fences.
 Do not add explanation before or after the JSON.
@@ -114,8 +127,11 @@ Use snake_case keys exactly as written.
 
 Tool use:
 - You have access to a tool named get_route_context.
+- You have access to a tool named get_roadside_options.
 - Use get_route_context when you need accurate route distance, duration, or leg order grounded in Google Maps data.
 - For road trip planning requests, you should usually call it once after selecting the ordered stop locations.
+- Use get_roadside_options when you want interesting optional attractions or oddities near the route.
+- For road trip planning requests, you should usually call get_roadside_options once after the ordered stop locations are selected.
 - Use the tool result to improve summary, recommendation, and budget guidance with realistic travel context.
 
 Rules:
@@ -123,11 +139,17 @@ Rules:
 - recommendations: array of 3 short strings
 - budget_notes: one short paragraph string
 - trip_stops: ordered array of stop objects
+- roadside_options: array of 0 to 5 optional attraction objects
 - each trip_stops item must contain:
   - day
   - order
   - name
   - location
+  - reason
+- each roadside_options item must contain:
+  - name
+  - location
+  - category
   - reason
 - location must be a real-world place string suitable for Google Maps geocoding
 - order should increase from the start of the trip to the final destination

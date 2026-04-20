@@ -2,7 +2,7 @@ import ast
 import json
 import re
 
-from app.models.trip_models import GeneratedTripPlan, Profile, TripStop
+from app.models.trip_models import GeneratedTripPlan, Profile, RoadsideOption, TripStop
 
 PLACEHOLDER_LOCATIONS = {
     "your starting location here",
@@ -61,6 +61,7 @@ def build_fallback_trip_plan(summary_text: str, profile: Profile) -> GeneratedTr
         recommendations=recommendations,
         budget_notes="Route details were generated from your profile because the model output was incomplete.",
         trip_stops=stops,
+        roadside_options=[],
     )
 
 
@@ -120,6 +121,7 @@ def _normalize_payload(payload: dict, profile: Profile) -> dict:
         "recommendations": _normalize_recommendations(payload.get("recommendations", [])),
         "budget_notes": str(payload.get("budget_notes", "")).strip(),
         "trip_stops": trip_stops,
+        "roadside_options": _normalize_roadside_options(payload.get("roadside_options", [])),
     }
 
 
@@ -161,6 +163,39 @@ def _normalize_stop(raw_stop: object, fallback_order: int, trip_length_days: int
         "location": location,
         "reason": reason,
     }
+
+
+def _normalize_roadside_options(raw_options: object) -> list[RoadsideOption]:
+    if not isinstance(raw_options, list):
+        return []
+
+    normalized_options: list[RoadsideOption] = []
+
+    for option in raw_options[:5]:
+        if not isinstance(option, dict):
+            continue
+
+        normalized_option = _normalize_object_keys(option)
+        name = str(normalized_option.get("name", "")).strip()
+        location = str(normalized_option.get("location", "")).strip()
+        category = str(normalized_option.get("category", "")).strip() or "Roadside stop"
+        reason = str(normalized_option.get("reason", "")).strip()
+        rating = normalized_option.get("rating")
+
+        if not name or not location or not reason:
+            continue
+
+        normalized_options.append(
+            RoadsideOption(
+                name=name,
+                location=location,
+                category=category,
+                reason=reason,
+                rating=float(rating) if isinstance(rating, (int, float)) else None,
+            )
+        )
+
+    return normalized_options
 
 
 def _coerce_positive_int(value: object, fallback: int) -> int:
@@ -297,6 +332,12 @@ def _normalize_top_level_keys(payload: dict) -> dict:
 
     if "trip_stops" not in normalized and "stops" in normalized:
         normalized["trip_stops"] = normalized["stops"]
+
+    if "roadside_options" not in normalized and "roadside_suggestions" in normalized:
+        normalized["roadside_options"] = normalized["roadside_suggestions"]
+
+    if "roadside_options" not in normalized and "attraction_options" in normalized:
+        normalized["roadside_options"] = normalized["attraction_options"]
 
     return normalized
 
