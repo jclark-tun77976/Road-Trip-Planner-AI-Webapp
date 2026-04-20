@@ -1,10 +1,11 @@
+import { createPortal } from "react-dom";
 import { useEffect, useRef, useState } from "react";
 import { loadGoogleMaps } from "../utils/googleMaps";
 
 const UNITED_STATES_CENTER = { lat: 39.8283, lng: -98.5795 };
 const UNITED_STATES_ZOOM = 4;
 const MAX_ROUTE_SAMPLE_POINTS = 4;
-const PLACE_SEARCH_RADIUS_METERS = 12000;
+const DEFAULT_PLACE_SEARCH_RADIUS_METERS = 12000;
 const PLACE_RESULTS_LIMIT = 12;
 const DEFAULT_PLACE_MARKER_COLOR = "#38bdf8";
 
@@ -416,6 +417,7 @@ function TripMap({
   onRouteChange,
   loading,
   profile,
+  sidebarPortalTarget,
 }) {
   const mapElementRef = useRef(null);
   const mapRef = useRef(null);
@@ -870,9 +872,12 @@ function TripMap({
         for (const layer of activeLayers) {
           for (const sampledPoint of sampledPoints) {
             for (const search of layer.searches) {
+              const placeSearchRadius = profile?.recommendation_radius_miles
+                ? Math.round(profile.recommendation_radius_miles * 1609)
+                : DEFAULT_PLACE_SEARCH_RADIUS_METERS;
               const results = await performNearbySearch(placesServiceRef.current, maps, {
                 location: sampledPoint,
-                radius: PLACE_SEARCH_RADIUS_METERS,
+                radius: placeSearchRadius,
                 ...search,
               });
 
@@ -940,7 +945,7 @@ function TripMap({
     return () => {
       cancelled = true;
     };
-  }, [activeRoute, availablePlaceLayerKey, placeLayerPreferences]);
+  }, [activeRoute, availablePlaceLayerKey, placeLayerPreferences, profile?.recommendation_radius_miles]);
 
   useEffect(
     () => () => {
@@ -948,6 +953,8 @@ function TripMap({
     },
     [],
   );
+
+  const [hoveredStopIndex, setHoveredStopIndex] = useState(null);
 
   const hasRoute = Boolean(activeRoute?.waypoints?.length);
   const orderedSidebarStops = buildOrderedTripStops(editableStops, fixedStops, profile);
@@ -997,10 +1004,13 @@ function TripMap({
 
       {mapError && <p className="status-message error-text">{mapError}</p>}
 
-      <div className="map-editor-layout">
+      <div className={`map-editor-layout${sidebarPortalTarget ? " map-editor-layout--fullwidth" : ""}`}>
         <div ref={mapElementRef} className="map-canvas" />
+      </div>
 
-        <aside className="route-editor-sidebar">
+      {(() => {
+        const sidebarEl = (
+          <aside className={`route-editor-sidebar${sidebarPortalTarget ? " route-editor-sidebar--standalone" : ""}`}>
           <div className="section-header">
             <div>
               <h3>Edit Route</h3>
@@ -1020,12 +1030,28 @@ function TripMap({
 
           {orderedSidebarStops.length > 0 ? (
             <div className="route-stop-list">
-              <div className="route-stop-item route-stop-item--anchor">
+              <div
+                className="route-stop-item route-stop-item--anchor"
+                onMouseEnter={() => setHoveredStopIndex(-1)}
+                onMouseLeave={() => setHoveredStopIndex(null)}
+              >
                 <div>
                   <p className="route-stop-label">Start</p>
                   <h4>{profile.start_location || "Starting point"}</h4>
                   <p className="muted-text">Fixed origin</p>
                 </div>
+                {hoveredStopIndex === -1 && (
+                  <div className="route-stop-tooltip">
+                    <p className="route-stop-tooltip-label">Starting Point</p>
+                    <p className="route-stop-tooltip-value">{profile.start_location || "Not set"}</p>
+                    {activeRoute && (
+                      <div className="route-stop-tooltip-stat">
+                        <span>Total route</span>
+                        <span>{activeRoute.total_distance_km} km · {Math.round(activeRoute.total_duration_minutes)} min</span>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {orderedSidebarStops.map((stop, index) => {
@@ -1035,6 +1061,7 @@ function TripMap({
                     editableStop.reason === stop.reason,
                 );
                 const isMovable = movableIndex !== -1;
+                const leg = activeRoute?.legs?.[index];
 
                 return (
                   <div
@@ -1042,6 +1069,8 @@ function TripMap({
                     className={`route-stop-item${
                       stop.isLocked ? " route-stop-item--anchor" : ""
                     }`}
+                    onMouseEnter={() => setHoveredStopIndex(index)}
+                    onMouseLeave={() => setHoveredStopIndex(null)}
                   >
                     <div>
                       <p className="route-stop-label">
@@ -1073,6 +1102,35 @@ function TripMap({
                     ) : (
                       <span className="route-stop-lock">Fixed</span>
                     )}
+
+                    {hoveredStopIndex === index && (
+                      <div className="route-stop-tooltip">
+                        <p className="route-stop-tooltip-label">
+                          {getSidebarLabel(stop, index + 1, orderedSidebarStops.length + 1)}
+                        </p>
+                        {stop.day != null && (
+                          <div className="route-stop-tooltip-stat">
+                            <span>Day</span>
+                            <span>{stop.day}</span>
+                          </div>
+                        )}
+                        {stop.reason && (
+                          <p className="route-stop-tooltip-reason">{stop.reason}</p>
+                        )}
+                        {leg && (
+                          <div className="route-stop-tooltip-stat">
+                            <span>Leg distance</span>
+                            <span>{leg.distance_km} km</span>
+                          </div>
+                        )}
+                        {leg && (
+                          <div className="route-stop-tooltip-stat">
+                            <span>Drive time</span>
+                            <span>{Math.round(leg.duration_minutes)} min</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -1087,8 +1145,12 @@ function TripMap({
             <p className="status-message">Updating route path, time, and distance...</p>
           )}
           {routeEditError && <p className="status-message error-text">{routeEditError}</p>}
-        </aside>
-      </div>
+          </aside>
+        );
+        return sidebarPortalTarget
+          ? createPortal(sidebarEl, sidebarPortalTarget)
+          : sidebarEl;
+      })()}
 
       <div className="map-toolbar">
         <p className="status-message">

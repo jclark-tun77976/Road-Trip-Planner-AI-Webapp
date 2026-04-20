@@ -40,6 +40,16 @@ def build_system_prompt(profile: Profile) -> str:
         ]
     )
 
+    if profile.max_daily_driving_miles:
+        profile_lines.append(
+            f"- Max daily driving: {profile.max_daily_driving_miles} miles per day — do not plan more than this per day"
+        )
+
+    if profile.recommendation_radius_miles:
+        profile_lines.append(
+            f"- Recommendation radius: only suggest roadside options within {profile.recommendation_radius_miles} miles of the planned route"
+        )
+
     return f"""{SYSTEM_PROMPT_TEMPLATE}
 
 User profile:
@@ -100,8 +110,24 @@ AI roadside options:
     return "\n\n".join(turns)
 
 
-def build_user_prompt(request: str, conversation_history: list[ConversationTurn] | None = None) -> str:
+def _build_constraint_block(profile: Profile) -> str:
+    constraints: list[str] = []
+    if profile.max_daily_driving_miles:
+        constraints.append(
+            f"- Never plan more than {profile.max_daily_driving_miles} miles of driving per day."
+        )
+    if profile.recommendation_radius_miles:
+        constraints.append(
+            f"- Only suggest roadside_options within {profile.recommendation_radius_miles} miles of the planned route."
+        )
+    if not constraints:
+        return ""
+    return "\nHard constraints from user profile:\n" + "\n".join(constraints) + "\n"
+
+
+def build_user_prompt(request: str, conversation_history: list[ConversationTurn] | None = None, profile: Profile | None = None) -> str:
     history_text = _format_conversation_history(conversation_history or [])
+    constraint_block = _build_constraint_block(profile) if profile else ""
 
     return f"""Previous conversation history:
 {history_text}
@@ -109,6 +135,7 @@ def build_user_prompt(request: str, conversation_history: list[ConversationTurn]
 Latest user request:
 {request}
 
+{constraint_block}
 If previous conversation history exists, treat the latest user request as a refinement of the existing trip unless the user explicitly asks to start over.
 Keep useful prior decisions that still fit the user's newest direction.
 Revise summary, recommendations, budget notes, and trip stops so they reflect the latest request.
@@ -166,7 +193,7 @@ def build_full_prompt(
     conversation_history: list[ConversationTurn] | None = None,
 ) -> str:
     system_prompt = build_system_prompt(profile)
-    user_prompt = build_user_prompt(request, conversation_history)
+    user_prompt = build_user_prompt(request, conversation_history, profile)
     return f"""{system_prompt}
 
 {user_prompt}"""

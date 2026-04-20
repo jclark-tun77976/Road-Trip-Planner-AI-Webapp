@@ -392,12 +392,36 @@
   align-items: start;
 }
 
+.map-editor-layout--fullwidth {
+  grid-template-columns: 1fr;
+}
+
 .route-editor-sidebar {
   min-width: 0;
   padding: 16px;
   border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: 16px;
   background-color: rgba(15, 23, 42, 0.65);
+}
+
+.route-editor-sidebar--standalone {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.route-panel-card {
+  overflow: hidden;
+  position: sticky;
+  top: 22px;
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
 }
 
 .route-reset-button {
@@ -418,6 +442,64 @@
   border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: 14px;
   background-color: rgba(15, 23, 42, 0.72);
+  position: relative;
+}
+
+.route-stop-tooltip {
+  position: absolute;
+  right: calc(100% + 12px);
+  top: 0;
+  width: 230px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(10, 18, 36, 0.98);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  z-index: 200;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.route-stop-tooltip-label {
+  margin: 0;
+  color: #93c5fd;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.route-stop-tooltip-value {
+  margin: 0;
+  color: #e2e8f0;
+  font-size: 13px;
+}
+
+.route-stop-tooltip-reason {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.route-stop-tooltip-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.route-stop-tooltip-stat span:first-child {
+  color: #64748b;
+}
+
+.route-stop-tooltip-stat span:last-child {
+  color: #e2e8f0;
+  font-weight: 600;
 }
 
 .route-stop-item--anchor {
@@ -559,6 +641,19 @@
 .refinement-card {
   width: 100%;
   border-top: 1px solid rgba(125, 211, 252, 0.18);
+}
+
+.trip-action-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.trip-action-button {
+  margin-top: 0;
+  flex: 1;
+  min-width: 120px;
+  text-align: center;
 }
 
 .refinement-textarea {
