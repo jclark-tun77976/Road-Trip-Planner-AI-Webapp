@@ -33,6 +33,11 @@ def parse_trip_plan(raw_text: str, profile: Profile) -> tuple[GeneratedTripPlan,
 
     payload = _load_json_payload(cleaned)
     if payload is None:
+        payload = _extract_section_payload(cleaned)
+        if payload is not None:
+            warnings.append("Model returned prose instead of strict JSON. Structured trip data was recovered.")
+
+    if payload is None:
         warnings.append("Model did not return valid JSON. A fallback itinerary was created.")
         return build_fallback_trip_plan(cleaned, profile), warnings
 
@@ -291,6 +296,113 @@ def _load_json_payload(cleaned: str) -> dict | None:
             return parsed
 
     return None
+
+
+def _extract_section_payload(text: str) -> dict | None:
+    if not text.strip():
+        return None
+
+    normalized_text = text.replace("**", "").strip()
+    section_labels = [
+        "Recommendations:",
+        "Budget Notes:",
+        "Trip Stops:",
+        "Roadside Options:",
+    ]
+    label_positions = {
+        label: normalized_text.find(label)
+        for label in section_labels
+    }
+    if all(position == -1 for position in label_positions.values()):
+        return None
+
+    recommendations_text = _extract_labeled_section(
+        normalized_text,
+        "Recommendations:",
+        "Budget Notes:",
+    )
+    budget_notes = _extract_labeled_section(
+        normalized_text,
+        "Budget Notes:",
+        "Trip Stops:",
+    )
+    trip_stops_text = _extract_labeled_section(
+        normalized_text,
+        "Trip Stops:",
+        "Roadside Options:",
+    )
+    roadside_options_text = _extract_labeled_section(
+        normalized_text,
+        "Roadside Options:",
+        None,
+    )
+
+    summary_end_candidates = [
+        position
+        for label, position in label_positions.items()
+        if label != "Recommendations:" and position != -1
+    ]
+    summary_end = label_positions["Recommendations:"]
+    if summary_end == -1:
+        summary_end = min(summary_end_candidates) if summary_end_candidates else len(normalized_text)
+    summary = normalized_text[:summary_end].strip(" :-\n")
+
+    trip_stop_items = _extract_object_list(trip_stops_text)
+    roadside_option_items = _extract_object_list(roadside_options_text)
+
+    if not any([summary, recommendations_text, budget_notes, trip_stop_items, roadside_option_items]):
+        return None
+
+    return {
+        "summary": summary,
+        "recommendations": _extract_bullet_list(recommendations_text),
+        "budget_notes": budget_notes.strip(),
+        "trip_stops": trip_stop_items,
+        "roadside_options": roadside_option_items,
+    }
+
+
+def _extract_labeled_section(text: str, start_label: str, end_label: str | None) -> str:
+    start = text.find(start_label)
+    if start == -1:
+        return ""
+
+    start += len(start_label)
+    if end_label is None:
+        return text[start:].strip()
+
+    end = text.find(end_label, start)
+    if end == -1:
+        return text[start:].strip()
+
+    return text[start:end].strip()
+
+
+def _extract_bullet_list(text: str) -> list[str]:
+    items: list[str] = []
+
+    for line in text.splitlines():
+        cleaned_line = line.strip()
+        if cleaned_line.startswith("*"):
+            cleaned_line = cleaned_line[1:].strip()
+        if cleaned_line.startswith("-"):
+            cleaned_line = cleaned_line[1:].strip()
+        if cleaned_line:
+            items.append(cleaned_line)
+
+    return items[:3]
+
+
+def _extract_object_list(text: str) -> list[dict]:
+    object_strings = re.findall(r"\{[^{}]*\}", text, flags=re.DOTALL)
+    parsed_objects: list[dict] = []
+
+    for object_text in object_strings:
+        parsed = _parse_candidate(object_text)
+        if isinstance(parsed, dict):
+            parsed_objects.append(parsed)
+
+    return parsed_objects
 
 
 def _extract_json_object(text: str) -> str | None:

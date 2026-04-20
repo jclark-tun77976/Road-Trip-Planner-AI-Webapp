@@ -89,16 +89,168 @@ function buildConversationHistoryPayload(entries) {
   }));
 }
 
+function normalizeLocation(value = "") {
+  return value.trim().toLowerCase();
+}
+
+function getTripLengthDays(profile) {
+  const rawValue = Number(profile?.trip_length_value);
+  const tripLengthValue = Number.isFinite(rawValue) && rawValue > 0 ? rawValue : 1;
+
+  if (profile?.trip_length_unit === "weeks") {
+    return tripLengthValue * 7;
+  }
+
+  if (profile?.trip_length_unit === "hours") {
+    return 1;
+  }
+
+  return tripLengthValue;
+}
+
+function resequenceTripStops(tripStops, profile) {
+  const totalDays = getTripLengthDays(profile);
+
+  return tripStops.map((stop, index) => ({
+    ...stop,
+    day: Math.min(index + 1, totalDays),
+    order: index + 1,
+  }));
+}
+
+function insertRoadsideStopIntoTrip(tripStops, roadsideOption, profile) {
+  const normalizedRoadsideLocation = normalizeLocation(roadsideOption.location);
+  if (!normalizedRoadsideLocation) {
+    return tripStops;
+  }
+
+  if (
+    tripStops.some(
+      (stop) => normalizeLocation(stop.location) === normalizedRoadsideLocation,
+    )
+  ) {
+    return tripStops;
+  }
+
+  const nextStop = {
+    day: 1,
+    order: 1,
+    name: roadsideOption.name,
+    location: roadsideOption.location,
+    reason: roadsideOption.reason,
+    latitude: null,
+    longitude: null,
+  };
+  const normalizedDestination = normalizeLocation(profile.destination);
+  let insertAt = tripStops.length;
+
+  if (normalizedDestination) {
+    const destinationIndex = tripStops.findIndex(
+      (stop) => normalizeLocation(stop.location) === normalizedDestination,
+    );
+    if (destinationIndex !== -1) {
+      insertAt = destinationIndex;
+    }
+  }
+
+  const nextTripStops = [...tripStops];
+  nextTripStops.splice(insertAt, 0, nextStop);
+  return resequenceTripStops(nextTripStops, profile);
+}
+
+function mergeRoadsideStopIntoProfileStops(stops, roadsideOption) {
+  const cleanedStops = stops.filter((stop) => stop.trim() !== "");
+  if (
+    cleanedStops.some(
+      (stop) => normalizeLocation(stop) === normalizeLocation(roadsideOption.location),
+    )
+  ) {
+    return stops;
+  }
+
+  return [...cleanedStops, roadsideOption.location];
+}
+
+function areTripStopsEqual(leftStops = [], rightStops = []) {
+  if (leftStops.length !== rightStops.length) {
+    return false;
+  }
+
+  return leftStops.every((stop, index) => {
+    const otherStop = rightStops[index];
+    return (
+      stop.day === otherStop.day &&
+      stop.order === otherStop.order &&
+      stop.name === otherStop.name &&
+      stop.location === otherStop.location &&
+      stop.reason === otherStop.reason &&
+      stop.latitude === otherStop.latitude &&
+      stop.longitude === otherStop.longitude
+    );
+  });
+}
+
+function areRoutesEqual(leftRoute, rightRoute) {
+  if (leftRoute === rightRoute) {
+    return true;
+  }
+
+  if (!leftRoute || !rightRoute) {
+    return false;
+  }
+
+  if (
+    leftRoute.total_distance_km !== rightRoute.total_distance_km ||
+    leftRoute.total_duration_minutes !== rightRoute.total_duration_minutes
+  ) {
+    return false;
+  }
+
+  if ((leftRoute.legs?.length ?? 0) !== (rightRoute.legs?.length ?? 0)) {
+    return false;
+  }
+
+  if ((leftRoute.waypoints?.length ?? 0) !== (rightRoute.waypoints?.length ?? 0)) {
+    return false;
+  }
+
+  return (
+    leftRoute.legs.every((leg, index) => {
+      const otherLeg = rightRoute.legs[index];
+      return (
+        leg.order === otherLeg.order &&
+        leg.from_name === otherLeg.from_name &&
+        leg.from_location === otherLeg.from_location &&
+        leg.to_name === otherLeg.to_name &&
+        leg.to_location === otherLeg.to_location &&
+        leg.distance_km === otherLeg.distance_km &&
+        leg.duration_minutes === otherLeg.duration_minutes
+      );
+    }) &&
+    leftRoute.waypoints.every((waypoint, index) => {
+      const otherWaypoint = rightRoute.waypoints[index];
+      return (
+        waypoint.order === otherWaypoint.order &&
+        waypoint.name === otherWaypoint.name &&
+        waypoint.location === otherWaypoint.location &&
+        waypoint.kind === otherWaypoint.kind &&
+        waypoint.latitude === otherWaypoint.latitude &&
+        waypoint.longitude === otherWaypoint.longitude
+      );
+    })
+  );
+}
+
 function App() {
   const [profile, setProfile] = useState(getInitialProfile);
   const [request, setRequest] = useState("");
   const [response, setResponse] = useState(null);
   const [responseHistory, setResponseHistory] = useState([]);
   const [refinementRequest, setRefinementRequest] = useState("");
-  const [latestSubmittedRequest, setLatestSubmittedRequest] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingSeconds, setLoadingSeconds] = useState(0);
   const [error, setError] = useState("");
+  const [tripMapRevision, setTripMapRevision] = useState(0);
 
   function persistProfile(updatedProfile) {
     setProfile(updatedProfile);
@@ -159,6 +311,33 @@ function App() {
     persistProfile(updatedProfile);
   }
 
+  function removeStopField(index) {
+    const updatedStops = profile.stops.filter((_, stopIndex) => stopIndex !== index);
+
+    persistProfile({
+      ...profile,
+      stops: updatedStops.length > 0 ? updatedStops : [""],
+    });
+  }
+
+  function moveStopField(index, direction) {
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= profile.stops.length) {
+      return;
+    }
+
+    const updatedStops = [...profile.stops];
+    [updatedStops[index], updatedStops[nextIndex]] = [
+      updatedStops[nextIndex],
+      updatedStops[index],
+    ];
+
+    persistProfile({
+      ...profile,
+      stops: updatedStops,
+    });
+  }
+
   function handleUseCurrentLocation(location) {
     persistProfile({
       ...profile,
@@ -172,9 +351,110 @@ function App() {
     setResponseHistory([]);
     setRequest("");
     setRefinementRequest("");
-    setLatestSubmittedRequest("");
     setError("");
+    setTripMapRevision(0);
     localStorage.removeItem("roadTripProfile");
+  }
+
+  function handleAddRoadsideOption(option) {
+    if (!response) {
+      return;
+    }
+
+    const nextTripStops = insertRoadsideStopIntoTrip(
+      response.trip_stops ?? [],
+      option,
+      profile,
+    );
+
+    if (areTripStopsEqual(response.trip_stops ?? [], nextTripStops)) {
+      return;
+    }
+
+    setResponse((current) =>
+      current
+        ? {
+            ...current,
+            trip_stops: nextTripStops,
+          }
+        : current,
+    );
+
+    setResponseHistory((previous) => {
+      if (!previous.length) {
+        return previous;
+      }
+
+      return previous.map((entry, index) =>
+        index === previous.length - 1
+          ? {
+              ...entry,
+              response: {
+                ...entry.response,
+                trip_stops: nextTripStops,
+              },
+            }
+          : entry,
+      );
+    });
+
+    const nextProfileStops = mergeRoadsideStopIntoProfileStops(profile.stops, option);
+    if (nextProfileStops !== profile.stops) {
+      persistProfile({
+        ...profile,
+        stops: nextProfileStops.length > 0 ? nextProfileStops : [""],
+      });
+    }
+
+    setTripMapRevision((previous) => previous + 1);
+  }
+
+  function handleInteractiveRouteChange(nextRoute, nextTripStops) {
+    setResponse((current) => {
+      if (!current) {
+        return current;
+      }
+
+      if (
+        areRoutesEqual(current.route, nextRoute) &&
+        areTripStopsEqual(current.trip_stops, nextTripStops)
+      ) {
+        return current;
+      }
+
+      return {
+        ...current,
+        route: nextRoute,
+        trip_stops: nextTripStops,
+      };
+    });
+
+    setResponseHistory((previous) => {
+      if (!previous.length) {
+        return previous;
+      }
+
+      const latestEntry = previous[previous.length - 1];
+      if (
+        areRoutesEqual(latestEntry.response.route, nextRoute) &&
+        areTripStopsEqual(latestEntry.response.trip_stops, nextTripStops)
+      ) {
+        return previous;
+      }
+
+      return previous.map((entry, index) =>
+        index === previous.length - 1
+          ? {
+              ...entry,
+              response: {
+                ...entry.response,
+                route: nextRoute,
+                trip_stops: nextTripStops,
+              },
+            }
+          : entry,
+      );
+    });
   }
 
   async function requestTripPlan(requestText, conversationHistory) {
@@ -262,7 +542,6 @@ function App() {
 
     setResponse(data);
     setResponseHistory([nextEntry]);
-    setLatestSubmittedRequest(requestText);
     setRefinementRequest("");
   }
 
@@ -281,16 +560,27 @@ function App() {
 
     setResponse(data);
     setResponseHistory((previous) => [...previous, nextEntry]);
-    setLatestSubmittedRequest(requestText);
     setRefinementRequest("");
   }
-
-  const currentRequestPreview =
-    latestSubmittedRequest || request || "Your trip request will appear here.";
+  const tripMapKey = responseHistory.length
+    ? `trip-map-${responseHistory[responseHistory.length - 1].version}-${tripMapRevision}`
+    : "trip-map-empty";
 
   return (
     <div className="page">
-      <h1 className="title">Road Trip Planner AI</h1>
+      <header className="hero">
+        <p className="hero-eyebrow">AI-assisted route design</p>
+        <h1 className="title">Road Trip Planner AI</h1>
+        <p className="hero-subtitle">
+          Build a trip, optimize the route, drag the path on the map, and refine the plan without
+          leaving the same workspace.
+        </p>
+        <div className="hero-chip-row">
+          <span className="hero-chip">Google Maps routing</span>
+          <span className="hero-chip">Stop optimization</span>
+          <span className="hero-chip">Iterative AI planning</span>
+        </div>
+      </header>
 
       <form className="planner-layout" onSubmit={handleSubmit}>
         <div className="card profile-card">
@@ -427,24 +717,59 @@ function App() {
           />
 
           <label className="label">Stops (Optional)</label>
-          {profile.stops.map((stop, index) => (
-            <LocationAutocompleteInput
-              key={index}
-              value={stop}
-              onChange={(value) => handleStopChange(index, value)}
-              placeholder={`Stop ${index + 1}`}
-            />
-          ))}
+          <p className="helper-text">
+            Add, remove, and reorder as many intermediate stops as you want.
+          </p>
+          <div className="stop-list">
+            {profile.stops.map((stop, index) => (
+              <div key={`profile-stop-${index}`} className="stop-row">
+                <div className="stop-row-input">
+                  <LocationAutocompleteInput
+                    value={stop}
+                    onChange={(value) => handleStopChange(index, value)}
+                    placeholder={`Stop ${index + 1}`}
+                  />
+                </div>
 
-          {profile.stops[profile.stops.length - 1]?.trim() && (
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={addStopField}
-            >
-              Add another stop
-            </button>
-          )}
+                <div className="stop-row-actions">
+                  <button
+                    type="button"
+                    className="route-move-button"
+                    onClick={() => moveStopField(index, -1)}
+                    disabled={index === 0}
+                    aria-label={`Move stop ${index + 1} up`}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    className="route-move-button"
+                    onClick={() => moveStopField(index, 1)}
+                    disabled={index === profile.stops.length - 1}
+                    aria-label={`Move stop ${index + 1} down`}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    className="stop-delete-button"
+                    onClick={() => removeStopField(index)}
+                    aria-label={`Remove stop ${index + 1}`}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={addStopField}
+          >
+            Add another stop
+          </button>
 
           <button type="button" className="clear-button" onClick={clearProfile}>
             Clear profile
@@ -453,15 +778,24 @@ function App() {
 
         <div className="content-column">
           <TripMap
+            key={tripMapKey}
             route={response?.route ?? null}
+            tripStops={response?.trip_stops ?? []}
             startLocation={profile.start_location}
             onUseCurrentLocation={handleUseCurrentLocation}
+            onRouteChange={handleInteractiveRouteChange}
             loading={loading}
             profile={profile}
           />
 
           <div className="card trip-request-card">
-            <h2>Trip Request</h2>
+            <div className="section-heading-block">
+              <p className="section-kicker">Prompt</p>
+              <h2>Trip Request</h2>
+              <p className="helper-text">
+                Describe the trip outcome you want. The AI will use your profile and route context.
+              </p>
+            </div>
 
             <label className="label">What do you want help with?</label>
             <textarea
@@ -485,13 +819,6 @@ function App() {
           </div>
         </div>
       </form>
-
-      <div className="card current-request-card">
-        <h2>Current Request</h2>
-        <div className="preview-box">
-          <p>{currentRequestPreview}</p>
-        </div>
-      </div>
 
       {responseHistory.length > 0 && (
         <section className="results-section">
@@ -521,29 +848,55 @@ function App() {
                     <p>{entry.response.trip_stops.length} stops mapped</p>
                   </div>
 
-                  <p>{entry.response.summary}</p>
+                  <p className="overview-copy">{entry.response.summary}</p>
 
-                  <h4>Recommendations</h4>
-                  <ul>
-                    {entry.response.recommendations.map((item, index) => (
-                      <li key={index}>{item}</li>
-                    ))}
-                  </ul>
+                  <div className="overview-section">
+                    <h4>Recommendations</h4>
+                    <ul className="overview-list">
+                      {entry.response.recommendations.map((item, index) => (
+                        <li key={index}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
 
-                  <h4>Budget Notes</h4>
-                  <p>{entry.response.budget_notes}</p>
+                  <div className="overview-section">
+                    <h4>Budget Notes</h4>
+                    <p>{entry.response.budget_notes}</p>
+                  </div>
 
                   {entry.response.roadside_options?.length > 0 && (
-                    <>
+                    <div className="overview-section">
                       <h4>Cool Roadside Options</h4>
-                      <ul>
+                      <ul className="overview-list roadside-option-list">
                         {entry.response.roadside_options.map((option, index) => (
-                          <li key={`${option.name}-${index}`}>
-                            <strong>{option.name}</strong>: {option.location} ({option.category}) - {option.reason}
+                          <li key={`${option.name}-${index}`} className="roadside-option-item">
+                            <div className="roadside-option-copy">
+                              <strong>{option.name}</strong>: {option.location} ({option.category}) - {option.reason}
+                            </div>
+                            {entry.version === responseHistory.length && (
+                              <button
+                                type="button"
+                                className="secondary-button roadside-add-button"
+                                onClick={() => handleAddRoadsideOption(option)}
+                                disabled={entry.response.trip_stops.some(
+                                  (stop) =>
+                                    normalizeLocation(stop.location) ===
+                                    normalizeLocation(option.location),
+                                )}
+                              >
+                                {entry.response.trip_stops.some(
+                                  (stop) =>
+                                    normalizeLocation(stop.location) ===
+                                    normalizeLocation(option.location),
+                                )
+                                  ? "Added"
+                                  : "Add to route"}
+                              </button>
+                            )}
                           </li>
                         ))}
                       </ul>
-                    </>
+                    </div>
                   )}
 
                   {entry.response.tool_calling_used &&

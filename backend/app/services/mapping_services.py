@@ -6,12 +6,24 @@ from app.models.trip_models import Coordinate, RoadsideOption, RouteData, RouteL
 
 
 GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
-DIRECTIONS_URL = "https://maps.googleapis.com/maps/api/directions/json"
+ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 PLACES_NEARBY_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
 REQUEST_TIMEOUT = 20.0
 ROADISDE_SAMPLE_POINTS = 5
 ROADSIDE_SEARCH_RADIUS_METERS = 15000
 MAX_ROADSIDE_OPTIONS = 5
+ROUTES_FIELD_MASK = ",".join(
+    [
+        "routes.distanceMeters",
+        "routes.duration",
+        "routes.polyline.encodedPolyline",
+        "routes.legs.distanceMeters",
+        "routes.legs.duration",
+        "routes.legs.startLocation",
+        "routes.legs.endLocation",
+        "routes.optimizedIntermediateWaypointIndex",
+    ]
+)
 PLACEHOLDER_LOCATIONS = {
     "",
     "your starting location here",
@@ -86,7 +98,8 @@ def build_route_data(
             return None, _attach_stop_coordinates(trip_stops, geocoded_waypoints), warnings
 
         route_data = fetch_route(client, geocoded_waypoints, _resolve_travel_mode(vehicle_type), api_key)
-        enriched_stops = _attach_stop_coordinates(trip_stops, geocoded_waypoints)
+        enriched_stops = _attach_stop_coordinates(trip_stops, route_data.waypoints)
+        enriched_stops = _reorder_trip_stops_to_route(enriched_stops, route_data.waypoints)
         return route_data, enriched_stops, warnings
 
 
@@ -125,44 +138,52 @@ def fetch_route(
     travel_mode: str,
     api_key: str,
 ) -> RouteData:
-    origin = _to_lat_lng_string(waypoints[0].latitude, waypoints[0].longitude)
-    destination = _to_lat_lng_string(waypoints[-1].latitude, waypoints[-1].longitude)
-    intermediate_waypoints = [
-        _to_lat_lng_string(waypoint.latitude, waypoint.longitude)
-        for waypoint in waypoints[1:-1]
-    ]
+    intermediate_waypoints = waypoints[1:-1]
+    optimize_waypoints = len(intermediate_waypoints) > 1
 
-    response = client.get(
-        DIRECTIONS_URL,
-        params={
-            "origin": origin,
-            "destination": destination,
-            "waypoints": "|".join(intermediate_waypoints) if intermediate_waypoints else None,
-            "mode": travel_mode,
-            "key": api_key,
+    response = client.post(
+        ROUTES_URL,
+        headers={
+            "X-Goog-Api-Key": api_key,
+            "X-Goog-FieldMask": ROUTES_FIELD_MASK,
+        },
+        json={
+            "origin": _build_lat_lng_location(waypoints[0]),
+            "destination": _build_lat_lng_location(waypoints[-1]),
+            "intermediates": [
+                _build_lat_lng_location(waypoint)
+                for waypoint in intermediate_waypoints
+            ],
+            "travelMode": _resolve_routes_travel_mode(travel_mode),
+            "optimizeWaypointOrder": optimize_waypoints,
+            "polylineQuality": "OVERVIEW",
+            "polylineEncoding": "ENCODED_POLYLINE",
         },
     )
     response.raise_for_status()
     payload = response.json()
-    status = payload.get("status", "Unknown routing error")
+    routes = payload.get("routes", [])
+    if not routes:
+        raise ValueError(payload.get("error", {}).get("message", "Unknown routing error"))
 
-    if status == "REQUEST_DENIED":
+    if payload.get("error", {}).get("status") == "PERMISSION_DENIED":
         raise GoogleMapsConfigurationError(
-            "Google Maps Directions API returned REQUEST_DENIED. "
-            "Enable Directions API and allow this key for backend/server requests."
+            "Google Maps Routes API returned PERMISSION_DENIED. "
+            "Enable Routes API and allow this key for backend/server requests."
         )
 
-    if status != "OK":
-        raise ValueError(status)
-
-    route = payload["routes"][0]
+    route = routes[0]
+    ordered_waypoints = _reorder_waypoints_from_routes_response(
+        waypoints,
+        route.get("optimizedIntermediateWaypointIndex", []),
+    )
     legs_payload = route.get("legs", [])
-    route_geometry = decode_polyline(route.get("overview_polyline", {}).get("points", ""))
+    route_geometry = decode_polyline(route.get("polyline", {}).get("encodedPolyline", ""))
 
     legs: list[RouteLeg] = []
     for index, leg in enumerate(legs_payload, start=1):
-        from_waypoint = waypoints[index - 1]
-        to_waypoint = waypoints[index]
+        from_waypoint = ordered_waypoints[index - 1]
+        to_waypoint = ordered_waypoints[index]
         legs.append(
             RouteLeg(
                 order=index,
@@ -170,8 +191,8 @@ def fetch_route(
                 from_location=from_waypoint.location,
                 to_name=to_waypoint.name,
                 to_location=to_waypoint.location,
-                distance_km=round(leg.get("distance", {}).get("value", 0) / 1000, 1),
-                duration_minutes=round(leg.get("duration", {}).get("value", 0) / 60, 1),
+                distance_km=round(leg.get("distanceMeters", 0) / 1000, 1),
+                duration_minutes=round(_parse_duration_minutes(leg.get("duration", "0s")), 1),
             )
         )
 
@@ -183,8 +204,98 @@ def fetch_route(
         total_duration_minutes=total_duration_minutes,
         legs=legs,
         geometry=route_geometry,
-        waypoints=waypoints,
+        waypoints=_attach_leg_coordinates_to_waypoints(ordered_waypoints, legs_payload),
     )
+
+
+def _build_lat_lng_location(waypoint: RouteWaypoint) -> dict:
+    return {
+        "location": {
+            "latLng": {
+                "latitude": waypoint.latitude,
+                "longitude": waypoint.longitude,
+            }
+        }
+    }
+
+
+def _resolve_routes_travel_mode(travel_mode: str) -> str:
+    if travel_mode == "walking":
+        return "WALK"
+    if travel_mode == "bicycling":
+        return "BICYCLE"
+    return "DRIVE"
+
+
+def _reorder_waypoints_from_routes_response(
+    waypoints: list[RouteWaypoint],
+    optimized_indexes: list[int],
+) -> list[RouteWaypoint]:
+    if len(waypoints) <= 2 or not optimized_indexes:
+        return waypoints
+
+    intermediate_waypoints = waypoints[1:-1]
+    if len(intermediate_waypoints) != len(optimized_indexes):
+        return waypoints
+
+    reordered_intermediates = [
+        intermediate_waypoints[index]
+        for index in optimized_indexes
+        if 0 <= index < len(intermediate_waypoints)
+    ]
+    if len(reordered_intermediates) != len(intermediate_waypoints):
+        return waypoints
+
+    ordered_waypoints = [waypoints[0], *reordered_intermediates, waypoints[-1]]
+    return [
+        waypoint.model_copy(update={"order": index})
+        for index, waypoint in enumerate(ordered_waypoints, start=1)
+    ]
+
+
+def _attach_leg_coordinates_to_waypoints(
+    waypoints: list[RouteWaypoint],
+    legs_payload: list[dict],
+) -> list[RouteWaypoint]:
+    if not legs_payload:
+        return waypoints
+
+    ordered_coordinates = [
+        _extract_lat_lng(legs_payload[0].get("startLocation", {}))
+    ]
+    ordered_coordinates.extend(
+        _extract_lat_lng(leg.get("endLocation", {}))
+        for leg in legs_payload
+    )
+
+    enriched_waypoints: list[RouteWaypoint] = []
+    for index, waypoint in enumerate(waypoints):
+        latitude, longitude = ordered_coordinates[index] if index < len(ordered_coordinates) else (waypoint.latitude, waypoint.longitude)
+        enriched_waypoints.append(
+            waypoint.model_copy(
+                update={
+                    "latitude": latitude,
+                    "longitude": longitude,
+                }
+            )
+        )
+
+    return enriched_waypoints
+
+
+def _extract_lat_lng(location: dict) -> tuple[float, float]:
+    lat_lng = location.get("latLng", {})
+    return (
+        float(lat_lng.get("latitude", 0)),
+        float(lat_lng.get("longitude", 0)),
+    )
+
+
+def _parse_duration_minutes(duration_value: str) -> float:
+    try:
+        return float(str(duration_value).rstrip("s")) / 60
+    except ValueError:
+        return 0
 
 
 def decode_polyline(encoded_polyline: str) -> list[Coordinate]:
@@ -278,6 +389,10 @@ def get_route_tool_context(
         "final_destination": final_destination,
         "total_distance_km": route_data.total_distance_km,
         "total_duration_minutes": route_data.total_duration_minutes,
+        "optimized_stop_locations": [
+            waypoint.location
+            for waypoint in route_data.waypoints[1:]
+        ],
         "leg_summaries": leg_summaries,
         "warnings": warnings,
     }
@@ -497,6 +612,48 @@ def _attach_stop_coordinates(trip_stops: list[TripStop], waypoints: list[RouteWa
         )
 
     return enriched_stops
+
+
+def _reorder_trip_stops_to_route(trip_stops: list[TripStop], waypoints: list[RouteWaypoint]) -> list[TripStop]:
+    if not trip_stops or not waypoints:
+        return trip_stops
+
+    max_day = max(stop.day for stop in trip_stops)
+    stop_lookup: dict[str, list[TripStop]] = {}
+    for stop in sorted(trip_stops, key=lambda item: item.order):
+        stop_lookup.setdefault(_normalize_location(stop.location), []).append(stop)
+
+    reordered_stops: list[TripStop] = []
+    for waypoint in waypoints[1:]:
+        normalized_location = _normalize_location(waypoint.location)
+        matched_stops = stop_lookup.get(normalized_location, [])
+        if not matched_stops:
+            continue
+
+        stop = matched_stops.pop(0)
+        reordered_stops.append(
+            stop.model_copy(
+                update={
+                    "order": len(reordered_stops) + 1,
+                    "day": min(len(reordered_stops) + 1, max_day),
+                    "latitude": waypoint.latitude,
+                    "longitude": waypoint.longitude,
+                }
+            )
+        )
+
+    for remaining_stops in stop_lookup.values():
+        for stop in remaining_stops:
+            reordered_stops.append(
+                stop.model_copy(
+                    update={
+                        "order": len(reordered_stops) + 1,
+                        "day": min(len(reordered_stops) + 1, max_day),
+                    }
+                )
+            )
+
+    return reordered_stops
 
 
 def _resolve_travel_mode(vehicle_type: str) -> str:

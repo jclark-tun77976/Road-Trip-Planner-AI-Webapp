@@ -67,10 +67,16 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
             "Gemini used the Google Maps route tool."
         )
         if result.get("route_available"):
+            optimized_stop_count = max(len(result.get("optimized_stop_locations", [])) - 1, 0)
             tool_usage["summaries"][-1] = (
-                "Gemini used the Google Maps route tool "
+                "Gemini used the Google Maps route and waypoint optimization tool "
                 f"for {len(stop_locations)} planned stops, "
-                f"{result.get('total_distance_km', 0)} km total."
+                f"{result.get('total_distance_km', 0)} km total"
+                + (
+                    f", with {optimized_stop_count} optimized stops."
+                    if optimized_stop_count > 1
+                    else "."
+                )
             )
         else:
             tool_usage["summaries"][-1] = (
