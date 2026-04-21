@@ -2,7 +2,6 @@ from pydantic import BaseModel, Field
 
 
 class Profile(BaseModel):
-    name: str
     start_location: str
     destination: str
     trip_length_value: int
@@ -14,6 +13,8 @@ class Profile(BaseModel):
     travel_style: str
     interests: str
     stops: list[str] = Field(default_factory=list)
+    max_daily_driving_miles: int | None = None
+    recommendation_radius_miles: int | None = None
 
 
 class Coordinate(BaseModel):

@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import ItineraryPanel from "./components/ItineraryPanel";
+import { useEffect, useRef, useState } from "react";
 import LocationAutocompleteInput from "./components/LocationAutocompleteInput";
 import TripMap from "./components/TripMap";
 import "./App.css";
@@ -25,7 +24,6 @@ const TRIP_LENGTH_UNITS = ["hours", "days", "weeks"];
 const TRAVEL_STYLE_OPTIONS = ["none", "hotel", "camping", "RV sleeping"];
 
 const INITIAL_PROFILE = {
-  name: "",
   start_location: "",
   destination: "",
   trip_length_value: "",
@@ -37,6 +35,8 @@ const INITIAL_PROFILE = {
   travel_style: "none",
   interests: "",
   stops: [""],
+  max_daily_driving_miles: "",
+  recommendation_radius_miles: "",
 };
 
 function getInitialProfile() {
@@ -53,7 +53,6 @@ function getInitialProfile() {
     const parsedProfile = JSON.parse(savedProfile);
     return {
       ...INITIAL_PROFILE,
-      name: parsedProfile.name ?? "",
       start_location: parsedProfile.start_location ?? "",
       destination: parsedProfile.destination ?? "",
       trip_length_value:
@@ -71,6 +70,8 @@ function getInitialProfile() {
         Array.isArray(parsedProfile.stops) && parsedProfile.stops.length > 0
           ? parsedProfile.stops
           : [""],
+      max_daily_driving_miles: parsedProfile.max_daily_driving_miles ?? "",
+      recommendation_radius_miles: parsedProfile.recommendation_radius_miles ?? "",
     };
   } catch {
     return INITIAL_PROFILE;
@@ -246,15 +247,27 @@ function App() {
   const [request, setRequest] = useState("");
   const [response, setResponse] = useState(null);
   const [responseHistory, setResponseHistory] = useState([]);
-  const [refinementRequest, setRefinementRequest] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingSeconds, setLoadingSeconds] = useState(0);
   const [error, setError] = useState("");
   const [tripMapRevision, setTripMapRevision] = useState(0);
+  const requestTextareaRef = useRef(null);
 
   function persistProfile(updatedProfile) {
     setProfile(updatedProfile);
     localStorage.setItem("roadTripProfile", JSON.stringify(updatedProfile));
+  }
+
+  function resizeRequestTextarea() {
+    const textarea = requestTextareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = "0px";
+    const nextHeight = Math.min(Math.max(textarea.scrollHeight, 52), 220);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 220 ? "auto" : "hidden";
   }
 
   useEffect(() => {
@@ -272,27 +285,33 @@ function App() {
     };
   }, [loading]);
 
+  useEffect(() => {
+    const textarea = requestTextareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = "0px";
+    const nextHeight = Math.min(Math.max(textarea.scrollHeight, 52), 220);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 220 ? "auto" : "hidden";
+  }, [request]);
+
   function handleProfileChange(event) {
     const { name, type, value, checked } = event.target;
-    const updatedProfile = {
+    persistProfile({
       ...profile,
       [name]: type === "checkbox" ? checked : value,
-    };
-
-    persistProfile(updatedProfile);
+    });
   }
 
   function handleStopChange(index, value) {
-    const updatedStops = profile.stops.map((stop, stopIndex) =>
-      stopIndex === index ? value : stop
-    );
-
-    const updatedProfile = {
+    persistProfile({
       ...profile,
-      stops: updatedStops,
-    };
-
-    persistProfile(updatedProfile);
+      stops: profile.stops.map((stop, stopIndex) =>
+        stopIndex === index ? value : stop,
+      ),
+    });
   }
 
   function handleLocationFieldChange(fieldName, value) {
@@ -303,17 +322,14 @@ function App() {
   }
 
   function addStopField() {
-    const updatedProfile = {
+    persistProfile({
       ...profile,
       stops: [...profile.stops, ""],
-    };
-
-    persistProfile(updatedProfile);
+    });
   }
 
   function removeStopField(index) {
     const updatedStops = profile.stops.filter((_, stopIndex) => stopIndex !== index);
-
     persistProfile({
       ...profile,
       stops: updatedStops.length > 0 ? updatedStops : [""],
@@ -331,7 +347,6 @@ function App() {
       updatedStops[nextIndex],
       updatedStops[index],
     ];
-
     persistProfile({
       ...profile,
       stops: updatedStops,
@@ -350,10 +365,17 @@ function App() {
     setResponse(null);
     setResponseHistory([]);
     setRequest("");
-    setRefinementRequest("");
     setError("");
     setTripMapRevision(0);
     localStorage.removeItem("roadTripProfile");
+  }
+
+  function startNewTrip() {
+    setResponse(null);
+    setResponseHistory([]);
+    setRequest("");
+    setError("");
+    setTripMapRevision(0);
   }
 
   function handleAddRoadsideOption(option) {
@@ -380,12 +402,8 @@ function App() {
         : current,
     );
 
-    setResponseHistory((previous) => {
-      if (!previous.length) {
-        return previous;
-      }
-
-      return previous.map((entry, index) =>
+    setResponseHistory((previous) =>
+      previous.map((entry, index) =>
         index === previous.length - 1
           ? {
               ...entry,
@@ -395,17 +413,13 @@ function App() {
               },
             }
           : entry,
-      );
+      ),
+    );
+
+    persistProfile({
+      ...profile,
+      stops: mergeRoadsideStopIntoProfileStops(profile.stops, option),
     });
-
-    const nextProfileStops = mergeRoadsideStopIntoProfileStops(profile.stops, option);
-    if (nextProfileStops !== profile.stops) {
-      persistProfile({
-        ...profile,
-        stops: nextProfileStops.length > 0 ? nextProfileStops : [""],
-      });
-    }
-
     setTripMapRevision((previous) => previous + 1);
   }
 
@@ -493,6 +507,12 @@ function App() {
             ...profile,
             trip_length_value: Number(profile.trip_length_value),
             stops: profile.stops.filter((stop) => stop.trim() !== ""),
+            max_daily_driving_miles: profile.max_daily_driving_miles
+              ? Number(profile.max_daily_driving_miles)
+              : null,
+            recommendation_radius_miles: profile.recommendation_radius_miles
+              ? Number(profile.recommendation_radius_miles)
+              : null,
           },
           request: requestText,
           conversation_history: buildConversationHistoryPayload(conversationHistory),
@@ -514,8 +534,7 @@ function App() {
         throw new Error(errorMessage);
       }
 
-      const data = await res.json();
-      return data;
+      return await res.json();
     } catch (err) {
       setError(err.message);
       return null;
@@ -525,29 +544,12 @@ function App() {
     }
   }
 
-  async function handleSubmit(event) {
-    event.preventDefault();
+  async function handleTripRequestSubmit(event) {
+    event?.preventDefault();
 
     const requestText = request.trim();
-    const data = await requestTripPlan(requestText, []);
-    if (!data) {
-      return;
-    }
-
-    const nextEntry = {
-      version: 1,
-      request: requestText,
-      response: data,
-    };
-
-    setResponse(data);
-    setResponseHistory([nextEntry]);
-    setRefinementRequest("");
-  }
-
-  async function handleRefinementSubmit() {
-    const requestText = refinementRequest.trim();
-    const data = await requestTripPlan(requestText, responseHistory);
+    const conversationHistory = responseHistory.length > 0 ? responseHistory : [];
+    const data = await requestTripPlan(requestText, conversationHistory);
     if (!data) {
       return;
     }
@@ -559,42 +561,48 @@ function App() {
     };
 
     setResponse(data);
-    setResponseHistory((previous) => [...previous, nextEntry]);
-    setRefinementRequest("");
+    setResponseHistory((previous) =>
+      previous.length > 0 ? [...previous, nextEntry] : [nextEntry],
+    );
+    setRequest("");
   }
+
+  function handleRequestInputChange(event) {
+    setRequest(event.target.value);
+    resizeRequestTextarea();
+  }
+
+  function handleRequestKeyDown(event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      handleTripRequestSubmit();
+    }
+  }
+
   const tripMapKey = responseHistory.length
     ? `trip-map-${responseHistory[responseHistory.length - 1].version}-${tripMapRevision}`
     : "trip-map-empty";
+  const hasResponse = responseHistory.length > 0;
 
   return (
     <div className="page">
       <header className="hero">
-        <p className="hero-eyebrow">AI-assisted route design</p>
-        <h1 className="title">Road Trip Planner AI</h1>
+        <p className="hero-eyebrow">AI-assisted routes</p>
+        <h1 className="title">Road Trip Planner</h1>
         <p className="hero-subtitle">
           Build a trip, optimize the route, drag the path on the map, and refine the plan without
           leaving the same workspace.
         </p>
         <div className="hero-chip-row">
           <span className="hero-chip">Google Maps routing</span>
-          <span className="hero-chip">Stop optimization</span>
+          <span className="hero-chip">Navigation optimization</span>
           <span className="hero-chip">Iterative AI planning</span>
         </div>
       </header>
 
-      <form className="planner-layout" onSubmit={handleSubmit}>
+      <form className="planner-layout" onSubmit={handleTripRequestSubmit}>
         <div className="card profile-card">
           <h2>User Profile</h2>
-
-          <label className="label">Name</label>
-          <input
-            className="input"
-            type="text"
-            name="name"
-            value={profile.name}
-            onChange={handleProfileChange}
-            placeholder="Enter your name"
-          />
 
           <label className="label">Starting Location</label>
           <LocationAutocompleteInput
@@ -716,6 +724,28 @@ function App() {
             placeholder="nature, food, small towns"
           />
 
+          <label className="label">Max Daily Driving (miles)</label>
+          <input
+            className="input"
+            type="number"
+            min="1"
+            name="max_daily_driving_miles"
+            value={profile.max_daily_driving_miles}
+            onChange={handleProfileChange}
+            placeholder="e.g. 300"
+          />
+
+          <label className="label">Recommendation Radius (miles)</label>
+          <input
+            className="input"
+            type="number"
+            min="1"
+            name="recommendation_radius_miles"
+            value={profile.recommendation_radius_miles}
+            onChange={handleProfileChange}
+            placeholder="e.g. 25"
+          />
+
           <label className="label">Stops (Optional)</label>
           <p className="helper-text">
             Add, remove, and reorder as many intermediate stops as you want.
@@ -790,32 +820,66 @@ function App() {
 
           <div className="card trip-request-card">
             <div className="section-heading-block">
-              <p className="section-kicker">Prompt</p>
-              <h2>Trip Request</h2>
+              <p className="section-kicker">{hasResponse ? "Refine" : "Prompt"}</p>
+              <h2>{hasResponse ? "Follow-up Request" : "Trip Request"}</h2>
               <p className="helper-text">
-                Describe the trip outcome you want. The AI will use your profile and route context.
+                {hasResponse
+                  ? "Ask for changes to the current plan. The AI will use your profile and full conversation history."
+                  : "Describe the trip outcome you want. The AI will use your profile and route context."}
               </p>
             </div>
 
-            <label className="label">What do you want help with?</label>
-            <textarea
-              className="textarea"
-              value={request}
-              onChange={(event) => setRequest(event.target.value)}
-              placeholder="Example: Plan me a 5-day scenic road trip with cheap hotels and good food stops."
-            />
-
-            <p className="char-count">Character count: {request.length}</p>
-
-            {loading && (
-              <p className="thinking-text">Thinking... {loadingSeconds}s</p>
+            {hasResponse && (
+              <div className="trip-action-row">
+                <button
+                  type="button"
+                  className="secondary-button trip-action-button"
+                  onClick={startNewTrip}
+                  disabled={loading}
+                >
+                  Plan Next Trip
+                </button>
+              </div>
             )}
 
-            <button type="submit" className="button" disabled={loading}>
-              {loading ? `Thinking... ${loadingSeconds}s` : "Submit"}
-            </button>
+            <label className="label">
+              {hasResponse ? "What would you like to change?" : "What do you want help with?"}
+            </label>
+            <div className="request-composer">
+              <textarea
+                ref={requestTextareaRef}
+                rows={1}
+                className="textarea textarea--composer"
+                value={request}
+                onChange={handleRequestInputChange}
+                onKeyDown={handleRequestKeyDown}
+                placeholder={
+                  hasResponse
+                    ? "Ask for a shorter route, more detail, different stops, or a revised style..."
+                    : "Plan a road trip to Hershey that arrives on day 6 with good stops on the way..."
+                }
+              />
+              <button type="submit" className="button composer-submit-button" disabled={loading}>
+                {loading
+                  ? hasResponse
+                    ? `Refining... ${loadingSeconds}s`
+                    : `Thinking... ${loadingSeconds}s`
+                  : hasResponse
+                    ? "Refine"
+                    : "Send"}
+              </button>
+            </div>
 
-            {!responseHistory.length && error && <p className="error-text">{error}</p>}
+            <div className="composer-meta">
+              <p className="char-count">Character count: {request.length}</p>
+              {loading && (
+                <p className="thinking-text">
+                  {hasResponse ? `Refining... ${loadingSeconds}s` : `Thinking... ${loadingSeconds}s`}
+                </p>
+              )}
+            </div>
+
+            {error && <p className="error-text">{error}</p>}
           </div>
         </div>
       </form>
@@ -833,128 +897,110 @@ function App() {
                   </p>
                   <h2>Version {entry.version}</h2>
                 </div>
-                <p>{entry.response.trip_stops.length} stops mapped</p>
+                <div className="thread-header-meta">
+                  {entry.response.route && (
+                    <div className="thread-stats-row">
+                      <span className="thread-stat-pill">
+                        {Math.round(entry.response.route.total_distance_km)} km
+                      </span>
+                      <span className="thread-stat-pill">
+                        {Math.round(entry.response.route.total_duration_minutes / 60)} hr drive
+                      </span>
+                    </div>
+                  )}
+                  <span className="thread-stop-count-pill">
+                    {entry.response.trip_stops.length} stops
+                  </span>
+                </div>
               </div>
 
               <div className="thread-request-box">
-                <h4>{entry.version === 1 ? "Original Request" : "Follow-up Request"}</h4>
-                <p>{entry.request}</p>
+                <p className="thread-request-label">
+                  {entry.version === 1 ? "Original Request" : "Follow-up Request"}
+                </p>
+                <p className="thread-request-text">{entry.request}</p>
               </div>
 
-              <div className="thread-response-grid">
-                <div className="result-card">
-                  <div className="section-header">
-                    <h3>Trip Overview</h3>
-                    <p>{entry.response.trip_stops.length} stops mapped</p>
-                  </div>
+              <div className="result-card">
+                <h3 className="result-card-title">Trip Overview</h3>
 
-                  <p className="overview-copy">{entry.response.summary}</p>
+                <p className="overview-copy">{entry.response.summary}</p>
 
+                <div className="overview-section">
+                  <p className="overview-section-kicker">Recommendations</p>
+                  <ul className="rec-list">
+                    {entry.response.recommendations.map((item, index) => (
+                      <li key={index} className="rec-item">
+                        <span className="rec-arrow">&#8594;</span>
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className="overview-section budget-section">
+                  <p className="overview-section-kicker">Budget Notes</p>
+                  <p className="overview-copy">{entry.response.budget_notes}</p>
+                </div>
+
+                {entry.response.roadside_options?.length > 0 && (
                   <div className="overview-section">
-                    <h4>Recommendations</h4>
-                    <ul className="overview-list">
-                      {entry.response.recommendations.map((item, index) => (
-                        <li key={index}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
-
-                  <div className="overview-section">
-                    <h4>Budget Notes</h4>
-                    <p>{entry.response.budget_notes}</p>
-                  </div>
-
-                  {entry.response.roadside_options?.length > 0 && (
-                    <div className="overview-section">
-                      <h4>Cool Roadside Options</h4>
-                      <ul className="overview-list roadside-option-list">
-                        {entry.response.roadside_options.map((option, index) => (
+                    <p className="overview-section-kicker">Cool Roadside Options</p>
+                    <ul className="roadside-option-list">
+                      {entry.response.roadside_options.map((option, index) => {
+                        const isAdded = entry.response.trip_stops.some(
+                          (stop) =>
+                            normalizeLocation(stop.location) ===
+                            normalizeLocation(option.location),
+                        );
+                        return (
                           <li key={`${option.name}-${index}`} className="roadside-option-item">
                             <div className="roadside-option-copy">
-                              <strong>{option.name}</strong>: {option.location} ({option.category}) - {option.reason}
+                              <div className="roadside-option-header">
+                                <span className="roadside-option-name">{option.name}</span>
+                                <span className="option-category-badge">{option.category}</span>
+                              </div>
+                              <p className="roadside-option-location">{option.location}</p>
+                              <p className="roadside-option-reason">{option.reason}</p>
                             </div>
                             {entry.version === responseHistory.length && (
                               <button
                                 type="button"
-                                className="secondary-button roadside-add-button"
+                                className={`roadside-add-button${isAdded ? " roadside-add-button--added" : ""}`}
                                 onClick={() => handleAddRoadsideOption(option)}
-                                disabled={entry.response.trip_stops.some(
-                                  (stop) =>
-                                    normalizeLocation(stop.location) ===
-                                    normalizeLocation(option.location),
-                                )}
+                                disabled={isAdded}
                               >
-                                {entry.response.trip_stops.some(
-                                  (stop) =>
-                                    normalizeLocation(stop.location) ===
-                                    normalizeLocation(option.location),
-                                )
-                                  ? "Added"
-                                  : "Add to route"}
+                                {isAdded ? "✓ Added" : "Add to route"}
                               </button>
                             )}
                           </li>
-                        ))}
-                      </ul>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
+
+                {entry.response.tool_calling_used &&
+                  entry.response.tool_calling_summary && (
+                    <div className="tooling-box">
+                      <p className="tooling-box-label">Route & Data Tools Used</p>
+                      <p className="tooling-box-text">{entry.response.tool_calling_summary}</p>
                     </div>
                   )}
 
-                  {entry.response.tool_calling_used &&
-                    entry.response.tool_calling_summary && (
-                      <div className="tooling-box">
-                        <h4>Tool Calling</h4>
-                        <p>{entry.response.tool_calling_summary}</p>
-                      </div>
-                    )}
-
-                  {entry.response.warnings?.length > 0 && (
-                    <div className="warning-box">
-                      <h4>Planning Notes</h4>
-                      <ul>
-                        {entry.response.warnings.map((warning, index) => (
-                          <li key={index}>{warning}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-
-                <ItineraryPanel response={entry.response} />
+                {entry.response.warnings?.length > 0 && (
+                  <div className="warning-box">
+                    <h4>Planning Notes</h4>
+                    <ul>
+                      {entry.response.warnings.map((warning, index) => (
+                        <li key={index}>{warning}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             </article>
           ))}
-
-          <div className="card refinement-card">
-            <h2>Refine This Plan</h2>
-            <p className="helper-text">
-              Ask for a shorter route, a different lodging style, extra detail, or any other revision.
-            </p>
-
-            <label className="label">Follow-up request</label>
-            <textarea
-              className="textarea refinement-textarea"
-              value={refinementRequest}
-              onChange={(event) => setRefinementRequest(event.target.value)}
-              placeholder="Example: Switch this to camping, shorten it to 3 days, and explain day 2 in more detail."
-            />
-
-            <p className="char-count">Character count: {refinementRequest.length}</p>
-
-            {loading && (
-              <p className="thinking-text">Refining... {loadingSeconds}s</p>
-            )}
-
-            <button
-              type="button"
-              className="button"
-              onClick={handleRefinementSubmit}
-              disabled={loading}
-            >
-              {loading ? `Refining... ${loadingSeconds}s` : "Submit refinement"}
-            </button>
-
-            {responseHistory.length > 0 && error && <p className="error-text">{error}</p>}
-          </div>
         </section>
       )}
     </div>

@@ -8,6 +8,8 @@ Keep the response clear, organized, and student-project appropriate.
 Build an ordered itinerary that can be mapped.
 Each trip stop should use a real, specific location string that can be geocoded.
 Include the final destination as the last trip stop.
+When the user asks for stops on the way, recommended places, scenic detours, or things to do en route, include those places as actual trip_stops in the mapped itinerary instead of only mentioning them in prose.
+Unless the user explicitly asks for a direct route with no stops, multi-day trips should usually include meaningful intermediate trip_stops before the destination.
 When a user asks for a refinement, update the previous plan coherently instead of ignoring prior context.
 """
 
@@ -20,7 +22,6 @@ def build_system_prompt(profile: Profile) -> str:
     travel_style_text = profile.travel_style.strip()
 
     profile_lines = [
-        f"- Name: {profile.name}",
         f"- Starting location: {profile.start_location}",
         f"- Destination: {profile.destination}",
         f"- Trip length: {profile.trip_length_value} {profile.trip_length_unit}",
@@ -39,6 +40,16 @@ def build_system_prompt(profile: Profile) -> str:
             f"- Preferred stops: {stops_text}",
         ]
     )
+
+    if profile.max_daily_driving_miles:
+        profile_lines.append(
+            f"- Max daily driving: {profile.max_daily_driving_miles} miles per day — do not plan more than this per day"
+        )
+
+    if profile.recommendation_radius_miles:
+        profile_lines.append(
+            f"- Recommendation radius: only suggest roadside options within {profile.recommendation_radius_miles} miles of the planned route"
+        )
 
     return f"""{SYSTEM_PROMPT_TEMPLATE}
 
@@ -100,8 +111,24 @@ AI roadside options:
     return "\n\n".join(turns)
 
 
-def build_user_prompt(request: str, conversation_history: list[ConversationTurn] | None = None) -> str:
+def _build_constraint_block(profile: Profile) -> str:
+    constraints: list[str] = []
+    if profile.max_daily_driving_miles:
+        constraints.append(
+            f"- Never plan more than {profile.max_daily_driving_miles} miles of driving per day."
+        )
+    if profile.recommendation_radius_miles:
+        constraints.append(
+            f"- Only suggest roadside_options within {profile.recommendation_radius_miles} miles of the planned route."
+        )
+    if not constraints:
+        return ""
+    return "\nHard constraints from user profile:\n" + "\n".join(constraints) + "\n"
+
+
+def build_user_prompt(request: str, conversation_history: list[ConversationTurn] | None = None, profile: Profile | None = None) -> str:
     history_text = _format_conversation_history(conversation_history or [])
+    constraint_block = _build_constraint_block(profile) if profile else ""
 
     return f"""Previous conversation history:
 {history_text}
@@ -109,6 +136,7 @@ def build_user_prompt(request: str, conversation_history: list[ConversationTurn]
 Latest user request:
 {request}
 
+{constraint_block}
 If previous conversation history exists, treat the latest user request as a refinement of the existing trip unless the user explicitly asks to start over.
 Keep useful prior decisions that still fit the user's newest direction.
 Revise summary, recommendations, budget notes, and trip stops so they reflect the latest request.
@@ -141,6 +169,8 @@ Rules:
 - budget_notes: one short paragraph string
 - trip_stops: ordered array of stop objects
 - roadside_options: array of 0 to 5 optional attraction objects
+- if the user asks for recommended stops on the way, scenic stops, or route suggestions, put the best 2 to 4 of those recommendations directly into trip_stops when they fit the trip length
+- use roadside_options only for extra optional ideas that are not already in trip_stops
 - each trip_stops item must contain:
   - day
   - order
@@ -166,7 +196,7 @@ def build_full_prompt(
     conversation_history: list[ConversationTurn] | None = None,
 ) -> str:
     system_prompt = build_system_prompt(profile)
-    user_prompt = build_user_prompt(request, conversation_history)
+    user_prompt = build_user_prompt(request, conversation_history, profile)
     return f"""{system_prompt}
 
 {user_prompt}"""

@@ -271,6 +271,8 @@ def _attach_leg_coordinates_to_waypoints(
     enriched_waypoints: list[RouteWaypoint] = []
     for index, waypoint in enumerate(waypoints):
         latitude, longitude = ordered_coordinates[index] if index < len(ordered_coordinates) else (waypoint.latitude, waypoint.longitude)
+        if latitude == 0 and longitude == 0:
+            latitude, longitude = waypoint.latitude, waypoint.longitude
         enriched_waypoints.append(
             waypoint.model_copy(
                 update={
@@ -584,7 +586,7 @@ def _dedupe_consecutive_locations(route_inputs: list[dict[str, str]]) -> list[di
     deduped: list[dict[str, str]] = []
 
     for route_input in route_inputs:
-        if deduped and _normalize_location(deduped[-1]["location"]) == _normalize_location(route_input["location"]):
+        if deduped and _normalize_comparable_location(deduped[-1]["location"]) == _normalize_comparable_location(route_input["location"]):
             if route_input["kind"] == "destination":
                 deduped[-1]["kind"] = "destination"
                 deduped[-1]["name"] = route_input["name"]
@@ -596,12 +598,12 @@ def _dedupe_consecutive_locations(route_inputs: list[dict[str, str]]) -> list[di
 
 def _attach_stop_coordinates(trip_stops: list[TripStop], waypoints: list[RouteWaypoint]) -> list[TripStop]:
     coordinate_lookup = {
-        _normalize_location(waypoint.location): waypoint for waypoint in waypoints
+        _normalize_comparable_location(waypoint.location): waypoint for waypoint in waypoints
     }
 
     enriched_stops: list[TripStop] = []
     for stop in trip_stops:
-        match = coordinate_lookup.get(_normalize_location(stop.location))
+        match = coordinate_lookup.get(_normalize_comparable_location(stop.location))
         enriched_stops.append(
             stop.model_copy(
                 update={
@@ -621,11 +623,11 @@ def _reorder_trip_stops_to_route(trip_stops: list[TripStop], waypoints: list[Rou
     max_day = max(stop.day for stop in trip_stops)
     stop_lookup: dict[str, list[TripStop]] = {}
     for stop in sorted(trip_stops, key=lambda item: item.order):
-        stop_lookup.setdefault(_normalize_location(stop.location), []).append(stop)
+        stop_lookup.setdefault(_normalize_comparable_location(stop.location), []).append(stop)
 
     reordered_stops: list[TripStop] = []
     for waypoint in waypoints[1:]:
-        normalized_location = _normalize_location(waypoint.location)
+        normalized_location = _normalize_comparable_location(waypoint.location)
         matched_stops = stop_lookup.get(normalized_location, [])
         if not matched_stops:
             continue
@@ -718,6 +720,14 @@ def _build_roadside_reason(profile_label: str, rating: object) -> str:
 
 def _normalize_location(location: str) -> str:
     return " ".join(location.lower().split())
+
+
+def _normalize_comparable_location(location: str) -> str:
+    normalized = _normalize_location(location)
+    normalized = normalized.replace("united states", "").replace("usa", "")
+    normalized = "".join(character if character.isalnum() or character.isspace() else " " for character in normalized)
+    normalized = " ".join(part for part in normalized.split() if not part.isdigit() or len(part) != 5)
+    return " ".join(normalized.split())
 
 
 def _is_geocodable_location(location: str) -> bool:

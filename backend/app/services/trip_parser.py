@@ -214,26 +214,26 @@ def _coerce_positive_int(value: object, fallback: int) -> int:
 def _sanitize_trip_stops(trip_stops: list[dict], profile: Profile) -> list[dict]:
     sanitized: list[dict] = []
     trip_length_days = _get_trip_length_days(profile)
-    normalized_start = _normalize_location(profile.start_location)
+    normalized_start = _normalize_comparable_location(profile.start_location)
     destination_location = profile.destination.strip()
-    normalized_destination = _normalize_location(destination_location)
+    normalized_destination = _normalize_comparable_location(destination_location)
 
     for stop in trip_stops:
-        normalized_location = _normalize_location(stop["location"])
+        normalized_location = _normalize_comparable_location(stop["location"])
         if not normalized_location or normalized_location in PLACEHOLDER_LOCATIONS:
             continue
 
         if normalized_location == normalized_start:
             continue
 
-        if sanitized and _normalize_location(sanitized[-1]["location"]) == normalized_location:
+        if sanitized and _normalize_comparable_location(sanitized[-1]["location"]) == normalized_location:
             continue
 
         sanitized.append(stop)
 
     if normalized_destination:
         has_destination = any(
-            _normalize_location(stop["location"]) == normalized_destination
+            _normalize_comparable_location(stop["location"]) == normalized_destination
             for stop in sanitized
         )
 
@@ -268,6 +268,15 @@ def _sanitize_trip_stops(trip_stops: list[dict], profile: Profile) -> list[dict]
 
 def _normalize_location(location: str) -> str:
     return " ".join(location.lower().split())
+
+
+def _normalize_comparable_location(location: str) -> str:
+    normalized = _normalize_location(location)
+    normalized = re.sub(r"\busa\b", "", normalized)
+    normalized = re.sub(r"\bunited states\b", "", normalized)
+    normalized = re.sub(r"\b\d{5}(?:-\d{4})?\b", "", normalized)
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    return " ".join(normalized.split())
 
 
 def _get_trip_length_days(profile: Profile) -> int:

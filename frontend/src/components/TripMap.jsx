@@ -4,7 +4,7 @@ import { loadGoogleMaps } from "../utils/googleMaps";
 const UNITED_STATES_CENTER = { lat: 39.8283, lng: -98.5795 };
 const UNITED_STATES_ZOOM = 4;
 const MAX_ROUTE_SAMPLE_POINTS = 4;
-const PLACE_SEARCH_RADIUS_METERS = 12000;
+const DEFAULT_PLACE_SEARCH_RADIUS_METERS = 12000;
 const PLACE_RESULTS_LIMIT = 12;
 const DEFAULT_PLACE_MARKER_COLOR = "#38bdf8";
 
@@ -38,6 +38,40 @@ const PLACE_LAYER_DEFINITIONS = {
 
 function normalizeLocation(value) {
   return value.trim().toLowerCase();
+}
+
+function normalizeComparableLocation(value) {
+  return value
+    .toLowerCase()
+    .replace(/\busa\b/g, "")
+    .replace(/\bunited states\b/g, "")
+    .replace(/\b\d{5}(?:-\d{4})?\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function locationsRoughlyMatch(left, right) {
+  const normalizedLeft = normalizeComparableLocation(left ?? "");
+  const normalizedRight = normalizeComparableLocation(right ?? "");
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft.includes(normalizedRight) ||
+    normalizedRight.includes(normalizedLeft)
+  );
 }
 
 function dedupeIds(ids) {
@@ -180,6 +214,9 @@ function createSyntheticStop(location, reason, kind) {
 function buildEditableStopGroups(profile, tripStops) {
   const sourceStops = (tripStops ?? [])
     .filter((stop) => stop?.location?.trim())
+    .filter(
+      (stop) => !locationsRoughlyMatch(stop.location, profile?.start_location ?? ""),
+    )
     .map((stop) => ({
       ...stop,
       kind: "stop",
@@ -194,7 +231,7 @@ function buildEditableStopGroups(profile, tripStops) {
   if (
     profile?.is_round_trip &&
     workingStops.length > 0 &&
-    normalizeLocation(workingStops[workingStops.length - 1].location) === normalizedStart
+    locationsRoughlyMatch(workingStops[workingStops.length - 1].location, profile?.start_location ?? "")
   ) {
     const returnStop = workingStops.pop();
     fixedStops.unshift({
@@ -207,7 +244,7 @@ function buildEditableStopGroups(profile, tripStops) {
   if (normalizedDestination) {
     if (
       workingStops.length > 0 &&
-      normalizeLocation(workingStops[workingStops.length - 1].location) === normalizedDestination
+      locationsRoughlyMatch(workingStops[workingStops.length - 1].location, profile?.destination ?? "")
     ) {
       const destinationStop = workingStops.pop();
       fixedStops.unshift({
@@ -406,6 +443,57 @@ function getSidebarLabel(stop, index, totalStops) {
   }
 
   return `Stop ${index}`;
+}
+
+function buildWaypointInfoContent(waypoint, index, route, tripStops, profile) {
+  const normalizedWaypointLocation = normalizeComparableLocation(waypoint.location ?? "");
+  const matchedStop = (tripStops ?? []).find(
+    (stop) => normalizeComparableLocation(stop.location ?? "") === normalizedWaypointLocation,
+  );
+  const previousLeg = index > 0 ? route?.legs?.[index - 1] : null;
+  const nextLeg = route?.legs?.[index] ?? null;
+
+  let helperLabel = "Trip stop";
+  let helperValue = waypoint.location;
+
+  if (waypoint.kind === "start") {
+    helperLabel = "Starting point";
+    helperValue = profile?.start_location || waypoint.location;
+  } else if (waypoint.kind === "destination") {
+    helperLabel = waypoint.location === profile?.start_location ? "Return stop" : "Destination";
+  }
+
+  return `
+    <div style="max-width:240px; color:#0f172a; font-family:Manrope, Arial, sans-serif;">
+      <div style="font-size:13px; font-weight:800; margin-bottom:4px;">${escapeHtml(waypoint.name)}</div>
+      <div style="font-size:12px; color:#334155; margin-bottom:8px;">${escapeHtml(helperValue)}</div>
+      <div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:#2563eb; font-weight:800; margin-bottom:4px;">
+        ${escapeHtml(helperLabel)}
+      </div>
+      ${
+        matchedStop?.day
+          ? `<div style="font-size:12px; margin-bottom:4px;"><strong>Day:</strong> ${escapeHtml(matchedStop.day)}</div>`
+          : ""
+      }
+      ${
+        previousLeg
+          ? `<div style="font-size:12px; margin-bottom:4px;"><strong>Arrive via:</strong> ${escapeHtml(previousLeg.distance_km)} km · ${escapeHtml(Math.round(previousLeg.duration_minutes))} min</div>`
+          : route
+            ? `<div style="font-size:12px; margin-bottom:4px;"><strong>Total route:</strong> ${escapeHtml(route.total_distance_km)} km · ${escapeHtml(Math.round(route.total_duration_minutes))} min</div>`
+            : ""
+      }
+      ${
+        nextLeg
+          ? `<div style="font-size:12px; margin-bottom:6px;"><strong>Next leg:</strong> ${escapeHtml(nextLeg.distance_km)} km · ${escapeHtml(Math.round(nextLeg.duration_minutes))} min</div>`
+          : ""
+      }
+      ${
+        matchedStop?.reason
+          ? `<div style="font-size:12px; color:#475569; line-height:1.45;">${escapeHtml(matchedStop.reason)}</div>`
+          : ""
+      }
+    </div>
+  `;
 }
 
 function TripMap({
@@ -670,6 +758,7 @@ function TripMap({
         if (directionsRendererRef.current) {
           directionsRendererRef.current.setMap(null);
         }
+        setActiveRoute(route);
         setRouteEditLoading(false);
         return;
       }
@@ -703,6 +792,7 @@ function TripMap({
       } catch (error) {
         if (!cancelled) {
           setRouteEditError(error.message);
+          setActiveRoute(route);
         }
       } finally {
         if (!cancelled) {
@@ -776,16 +866,21 @@ function TripMap({
           });
 
           const infoWindow = new maps.InfoWindow({
-            content: `
-              <div style="max-width:220px">
-                <strong>${waypoint.name}</strong><br />
-                <span>${waypoint.location}</span>
-              </div>
-            `,
+            content: buildWaypointInfoContent(
+              waypoint,
+              index,
+              displayRoute,
+              tripStops,
+              profile,
+            ),
           });
 
+          marker.addListener("mouseover", () =>
+            infoWindow.open({ anchor: marker, map: mapRef.current, shouldFocus: false }),
+          );
+          marker.addListener("mouseout", () => infoWindow.close());
           marker.addListener("click", () =>
-            infoWindow.open({ anchor: marker, map: mapRef.current }),
+            infoWindow.open({ anchor: marker, map: mapRef.current, shouldFocus: false }),
           );
           markersRef.current.push(marker);
           bounds.extend(marker.getPosition());
@@ -824,7 +919,7 @@ function TripMap({
     return () => {
       cancelled = true;
     };
-  }, [activeRoute, currentLocation]);
+  }, [activeRoute, currentLocation, profile, tripStops]);
 
   useEffect(() => {
     let cancelled = false;
@@ -870,9 +965,12 @@ function TripMap({
         for (const layer of activeLayers) {
           for (const sampledPoint of sampledPoints) {
             for (const search of layer.searches) {
+              const placeSearchRadius = profile?.recommendation_radius_miles
+                ? Math.round(profile.recommendation_radius_miles * 1609)
+                : DEFAULT_PLACE_SEARCH_RADIUS_METERS;
               const results = await performNearbySearch(placesServiceRef.current, maps, {
                 location: sampledPoint,
-                radius: PLACE_SEARCH_RADIUS_METERS,
+                radius: placeSearchRadius,
                 ...search,
               });
 
@@ -940,7 +1038,7 @@ function TripMap({
     return () => {
       cancelled = true;
     };
-  }, [activeRoute, availablePlaceLayerKey, placeLayerPreferences]);
+  }, [activeRoute, availablePlaceLayerKey, placeLayerPreferences, profile?.recommendation_radius_miles]);
 
   useEffect(
     () => () => {
@@ -948,6 +1046,8 @@ function TripMap({
     },
     [],
   );
+
+  const [hoveredStopIndex, setHoveredStopIndex] = useState(null);
 
   const hasRoute = Boolean(activeRoute?.waypoints?.length);
   const orderedSidebarStops = buildOrderedTripStops(editableStops, fixedStops, profile);
@@ -997,10 +1097,12 @@ function TripMap({
 
       {mapError && <p className="status-message error-text">{mapError}</p>}
 
-      <div className="map-editor-layout">
+      <div className={`map-editor-layout${hasRoute ? " map-editor-layout--stacked" : " map-editor-layout--fullwidth"}`}>
         <div ref={mapElementRef} className="map-canvas" />
+      </div>
 
-        <aside className="route-editor-sidebar">
+      {hasRoute && (
+        <aside className="route-editor-sidebar route-editor-sidebar--stacked">
           <div className="section-header">
             <div>
               <h3>Edit Route</h3>
@@ -1019,13 +1121,29 @@ function TripMap({
           </div>
 
           {orderedSidebarStops.length > 0 ? (
-            <div className="route-stop-list">
-              <div className="route-stop-item route-stop-item--anchor">
+            <div className="route-stop-list route-stop-list--stacked">
+              <div
+                className="route-stop-item route-stop-item--anchor"
+                onMouseEnter={() => setHoveredStopIndex(-1)}
+                onMouseLeave={() => setHoveredStopIndex(null)}
+              >
                 <div>
                   <p className="route-stop-label">Start</p>
                   <h4>{profile.start_location || "Starting point"}</h4>
                   <p className="muted-text">Fixed origin</p>
                 </div>
+                {hoveredStopIndex === -1 && (
+                  <div className="route-stop-tooltip">
+                    <p className="route-stop-tooltip-label">Starting Point</p>
+                    <p className="route-stop-tooltip-value">{profile.start_location || "Not set"}</p>
+                    {activeRoute && (
+                      <div className="route-stop-tooltip-stat">
+                        <span>Total route</span>
+                        <span>{activeRoute.total_distance_km} km · {Math.round(activeRoute.total_duration_minutes)} min</span>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {orderedSidebarStops.map((stop, index) => {
@@ -1035,6 +1153,7 @@ function TripMap({
                     editableStop.reason === stop.reason,
                 );
                 const isMovable = movableIndex !== -1;
+                const leg = activeRoute?.legs?.[index];
 
                 return (
                   <div
@@ -1042,6 +1161,8 @@ function TripMap({
                     className={`route-stop-item${
                       stop.isLocked ? " route-stop-item--anchor" : ""
                     }`}
+                    onMouseEnter={() => setHoveredStopIndex(index)}
+                    onMouseLeave={() => setHoveredStopIndex(null)}
                   >
                     <div>
                       <p className="route-stop-label">
@@ -1058,20 +1179,51 @@ function TripMap({
                           className="route-move-button"
                           onClick={() => moveStop(movableIndex, -1)}
                           disabled={movableIndex === 0 || routeEditLoading}
+                          aria-label={`Move ${stop.name} left`}
                         >
-                          ↑
+                          ←
                         </button>
                         <button
                           type="button"
                           className="route-move-button"
                           onClick={() => moveStop(movableIndex, 1)}
                           disabled={movableIndex === editableStops.length - 1 || routeEditLoading}
+                          aria-label={`Move ${stop.name} right`}
                         >
-                          ↓
+                          →
                         </button>
                       </div>
                     ) : (
                       <span className="route-stop-lock">Fixed</span>
+                    )}
+
+                    {hoveredStopIndex === index && (
+                      <div className="route-stop-tooltip">
+                        <p className="route-stop-tooltip-label">
+                          {getSidebarLabel(stop, index + 1, orderedSidebarStops.length + 1)}
+                        </p>
+                        {stop.day != null && (
+                          <div className="route-stop-tooltip-stat">
+                            <span>Day</span>
+                            <span>{stop.day}</span>
+                          </div>
+                        )}
+                        {stop.reason && (
+                          <p className="route-stop-tooltip-reason">{stop.reason}</p>
+                        )}
+                        {leg && (
+                          <div className="route-stop-tooltip-stat">
+                            <span>Leg distance</span>
+                            <span>{leg.distance_km} km</span>
+                          </div>
+                        )}
+                        {leg && (
+                          <div className="route-stop-tooltip-stat">
+                            <span>Drive time</span>
+                            <span>{Math.round(leg.duration_minutes)} min</span>
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 );
@@ -1088,7 +1240,7 @@ function TripMap({
           )}
           {routeEditError && <p className="status-message error-text">{routeEditError}</p>}
         </aside>
-      </div>
+      )}
 
       <div className="map-toolbar">
         <p className="status-message">
