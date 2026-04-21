@@ -2,7 +2,6 @@ from pydantic import BaseModel, Field
 
 
 class Profile(BaseModel):
-    name: str
     start_location: str
     destination: str
     trip_length_value: int

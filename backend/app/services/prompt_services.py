@@ -8,6 +8,8 @@ Keep the response clear, organized, and student-project appropriate.
 Build an ordered itinerary that can be mapped.
 Each trip stop should use a real, specific location string that can be geocoded.
 Include the final destination as the last trip stop.
+When the user asks for stops on the way, recommended places, scenic detours, or things to do en route, include those places as actual trip_stops in the mapped itinerary instead of only mentioning them in prose.
+Unless the user explicitly asks for a direct route with no stops, multi-day trips should usually include meaningful intermediate trip_stops before the destination.
 When a user asks for a refinement, update the previous plan coherently instead of ignoring prior context.
 """
 
@@ -20,7 +22,6 @@ def build_system_prompt(profile: Profile) -> str:
     travel_style_text = profile.travel_style.strip()
 
     profile_lines = [
-        f"- Name: {profile.name}",
         f"- Starting location: {profile.start_location}",
         f"- Destination: {profile.destination}",
         f"- Trip length: {profile.trip_length_value} {profile.trip_length_unit}",
@@ -168,6 +169,8 @@ Rules:
 - budget_notes: one short paragraph string
 - trip_stops: ordered array of stop objects
 - roadside_options: array of 0 to 5 optional attraction objects
+- if the user asks for recommended stops on the way, scenic stops, or route suggestions, put the best 2 to 4 of those recommendations directly into trip_stops when they fit the trip length
+- use roadside_options only for extra optional ideas that are not already in trip_stops
 - each trip_stops item must contain:
   - day
   - order

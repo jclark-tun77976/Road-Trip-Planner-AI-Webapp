@@ -1,4 +1,3 @@
-import { createPortal } from "react-dom";
 import { useEffect, useRef, useState } from "react";
 import { loadGoogleMaps } from "../utils/googleMaps";
 
@@ -39,6 +38,40 @@ const PLACE_LAYER_DEFINITIONS = {
 
 function normalizeLocation(value) {
   return value.trim().toLowerCase();
+}
+
+function normalizeComparableLocation(value) {
+  return value
+    .toLowerCase()
+    .replace(/\busa\b/g, "")
+    .replace(/\bunited states\b/g, "")
+    .replace(/\b\d{5}(?:-\d{4})?\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function locationsRoughlyMatch(left, right) {
+  const normalizedLeft = normalizeComparableLocation(left ?? "");
+  const normalizedRight = normalizeComparableLocation(right ?? "");
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft.includes(normalizedRight) ||
+    normalizedRight.includes(normalizedLeft)
+  );
 }
 
 function dedupeIds(ids) {
@@ -181,6 +214,9 @@ function createSyntheticStop(location, reason, kind) {
 function buildEditableStopGroups(profile, tripStops) {
   const sourceStops = (tripStops ?? [])
     .filter((stop) => stop?.location?.trim())
+    .filter(
+      (stop) => !locationsRoughlyMatch(stop.location, profile?.start_location ?? ""),
+    )
     .map((stop) => ({
       ...stop,
       kind: "stop",
@@ -195,7 +231,7 @@ function buildEditableStopGroups(profile, tripStops) {
   if (
     profile?.is_round_trip &&
     workingStops.length > 0 &&
-    normalizeLocation(workingStops[workingStops.length - 1].location) === normalizedStart
+    locationsRoughlyMatch(workingStops[workingStops.length - 1].location, profile?.start_location ?? "")
   ) {
     const returnStop = workingStops.pop();
     fixedStops.unshift({
@@ -208,7 +244,7 @@ function buildEditableStopGroups(profile, tripStops) {
   if (normalizedDestination) {
     if (
       workingStops.length > 0 &&
-      normalizeLocation(workingStops[workingStops.length - 1].location) === normalizedDestination
+      locationsRoughlyMatch(workingStops[workingStops.length - 1].location, profile?.destination ?? "")
     ) {
       const destinationStop = workingStops.pop();
       fixedStops.unshift({
@@ -409,6 +445,57 @@ function getSidebarLabel(stop, index, totalStops) {
   return `Stop ${index}`;
 }
 
+function buildWaypointInfoContent(waypoint, index, route, tripStops, profile) {
+  const normalizedWaypointLocation = normalizeComparableLocation(waypoint.location ?? "");
+  const matchedStop = (tripStops ?? []).find(
+    (stop) => normalizeComparableLocation(stop.location ?? "") === normalizedWaypointLocation,
+  );
+  const previousLeg = index > 0 ? route?.legs?.[index - 1] : null;
+  const nextLeg = route?.legs?.[index] ?? null;
+
+  let helperLabel = "Trip stop";
+  let helperValue = waypoint.location;
+
+  if (waypoint.kind === "start") {
+    helperLabel = "Starting point";
+    helperValue = profile?.start_location || waypoint.location;
+  } else if (waypoint.kind === "destination") {
+    helperLabel = waypoint.location === profile?.start_location ? "Return stop" : "Destination";
+  }
+
+  return `
+    <div style="max-width:240px; color:#0f172a; font-family:Manrope, Arial, sans-serif;">
+      <div style="font-size:13px; font-weight:800; margin-bottom:4px;">${escapeHtml(waypoint.name)}</div>
+      <div style="font-size:12px; color:#334155; margin-bottom:8px;">${escapeHtml(helperValue)}</div>
+      <div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:#2563eb; font-weight:800; margin-bottom:4px;">
+        ${escapeHtml(helperLabel)}
+      </div>
+      ${
+        matchedStop?.day
+          ? `<div style="font-size:12px; margin-bottom:4px;"><strong>Day:</strong> ${escapeHtml(matchedStop.day)}</div>`
+          : ""
+      }
+      ${
+        previousLeg
+          ? `<div style="font-size:12px; margin-bottom:4px;"><strong>Arrive via:</strong> ${escapeHtml(previousLeg.distance_km)} km · ${escapeHtml(Math.round(previousLeg.duration_minutes))} min</div>`
+          : route
+            ? `<div style="font-size:12px; margin-bottom:4px;"><strong>Total route:</strong> ${escapeHtml(route.total_distance_km)} km · ${escapeHtml(Math.round(route.total_duration_minutes))} min</div>`
+            : ""
+      }
+      ${
+        nextLeg
+          ? `<div style="font-size:12px; margin-bottom:6px;"><strong>Next leg:</strong> ${escapeHtml(nextLeg.distance_km)} km · ${escapeHtml(Math.round(nextLeg.duration_minutes))} min</div>`
+          : ""
+      }
+      ${
+        matchedStop?.reason
+          ? `<div style="font-size:12px; color:#475569; line-height:1.45;">${escapeHtml(matchedStop.reason)}</div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
 function TripMap({
   route,
   tripStops,
@@ -417,7 +504,6 @@ function TripMap({
   onRouteChange,
   loading,
   profile,
-  sidebarPortalTarget,
 }) {
   const mapElementRef = useRef(null);
   const mapRef = useRef(null);
@@ -672,6 +758,7 @@ function TripMap({
         if (directionsRendererRef.current) {
           directionsRendererRef.current.setMap(null);
         }
+        setActiveRoute(route);
         setRouteEditLoading(false);
         return;
       }
@@ -705,6 +792,7 @@ function TripMap({
       } catch (error) {
         if (!cancelled) {
           setRouteEditError(error.message);
+          setActiveRoute(route);
         }
       } finally {
         if (!cancelled) {
@@ -778,16 +866,21 @@ function TripMap({
           });
 
           const infoWindow = new maps.InfoWindow({
-            content: `
-              <div style="max-width:220px">
-                <strong>${waypoint.name}</strong><br />
-                <span>${waypoint.location}</span>
-              </div>
-            `,
+            content: buildWaypointInfoContent(
+              waypoint,
+              index,
+              displayRoute,
+              tripStops,
+              profile,
+            ),
           });
 
+          marker.addListener("mouseover", () =>
+            infoWindow.open({ anchor: marker, map: mapRef.current, shouldFocus: false }),
+          );
+          marker.addListener("mouseout", () => infoWindow.close());
           marker.addListener("click", () =>
-            infoWindow.open({ anchor: marker, map: mapRef.current }),
+            infoWindow.open({ anchor: marker, map: mapRef.current, shouldFocus: false }),
           );
           markersRef.current.push(marker);
           bounds.extend(marker.getPosition());
@@ -826,7 +919,7 @@ function TripMap({
     return () => {
       cancelled = true;
     };
-  }, [activeRoute, currentLocation]);
+  }, [activeRoute, currentLocation, profile, tripStops]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1004,13 +1097,12 @@ function TripMap({
 
       {mapError && <p className="status-message error-text">{mapError}</p>}
 
-      <div className={`map-editor-layout${sidebarPortalTarget ? " map-editor-layout--fullwidth" : ""}`}>
+      <div className={`map-editor-layout${hasRoute ? " map-editor-layout--stacked" : " map-editor-layout--fullwidth"}`}>
         <div ref={mapElementRef} className="map-canvas" />
       </div>
 
-      {(() => {
-        const sidebarEl = (
-          <aside className={`route-editor-sidebar${sidebarPortalTarget ? " route-editor-sidebar--standalone" : ""}`}>
+      {hasRoute && (
+        <aside className="route-editor-sidebar route-editor-sidebar--stacked">
           <div className="section-header">
             <div>
               <h3>Edit Route</h3>
@@ -1029,7 +1121,7 @@ function TripMap({
           </div>
 
           {orderedSidebarStops.length > 0 ? (
-            <div className="route-stop-list">
+            <div className="route-stop-list route-stop-list--stacked">
               <div
                 className="route-stop-item route-stop-item--anchor"
                 onMouseEnter={() => setHoveredStopIndex(-1)}
@@ -1087,16 +1179,18 @@ function TripMap({
                           className="route-move-button"
                           onClick={() => moveStop(movableIndex, -1)}
                           disabled={movableIndex === 0 || routeEditLoading}
+                          aria-label={`Move ${stop.name} left`}
                         >
-                          ↑
+                          ←
                         </button>
                         <button
                           type="button"
                           className="route-move-button"
                           onClick={() => moveStop(movableIndex, 1)}
                           disabled={movableIndex === editableStops.length - 1 || routeEditLoading}
+                          aria-label={`Move ${stop.name} right`}
                         >
-                          ↓
+                          →
                         </button>
                       </div>
                     ) : (
@@ -1145,12 +1239,8 @@ function TripMap({
             <p className="status-message">Updating route path, time, and distance...</p>
           )}
           {routeEditError && <p className="status-message error-text">{routeEditError}</p>}
-          </aside>
-        );
-        return sidebarPortalTarget
-          ? createPortal(sidebarEl, sidebarPortalTarget)
-          : sidebarEl;
-      })()}
+        </aside>
+      )}
 
       <div className="map-toolbar">
         <p className="status-message">
