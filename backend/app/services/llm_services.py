@@ -1,4 +1,3 @@
-import os
 import re
 
 from dotenv import load_dotenv
@@ -12,6 +11,7 @@ from app.services.mapping_services import (
     get_roadside_tool_context,
     get_route_tool_context,
 )
+from app.services.model_registry import get_active_llm_config
 from app.services.prompt_services import build_full_prompt
 from app.services.trip_parser import parse_trip_plan
 
@@ -156,11 +156,18 @@ def _promote_recommended_stops(
 
 
 def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set in the environment.")
+    llm_config = get_active_llm_config()
+    if not llm_config.api_key:
+        raise ValueError(f"{llm_config.api_key_env_var} is not set in the environment.")
 
-    client = genai.Client(api_key=api_key)
+    if llm_config.provider != "google":
+        raise ValueError(
+            f"{llm_config.provider_label} is configured with model '{llm_config.model or 'not set'}', "
+            "but this backend is currently wired only for the Google tool-calling flow. "
+            "Switch LLM_PROVIDER back to 'google' or extend llm_services.py for that provider."
+        )
+
+    client = genai.Client(api_key=llm_config.api_key)
     full_prompt = build_full_prompt(
         trip_request.profile,
         trip_request.request,
@@ -251,7 +258,7 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
         return result
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=llm_config.model,
         contents=full_prompt,
         config=types.GenerateContentConfig(
             tools=[get_route_context, get_roadside_options],
