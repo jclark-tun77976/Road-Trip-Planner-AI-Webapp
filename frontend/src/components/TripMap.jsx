@@ -60,6 +60,27 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function formatMiles(distanceKm) {
+  const miles = Number(distanceKm ?? 0) * 0.621371;
+  return `${miles.toFixed(1)} mi`;
+}
+
+function formatDuration(durationMinutes) {
+  const totalMinutes = Math.max(Math.round(Number(durationMinutes ?? 0)), 0);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours === 0) {
+    return `${minutes} min`;
+  }
+
+  if (minutes === 0) {
+    return `${hours} hr`;
+  }
+
+  return `${hours} hr ${minutes} min`;
+}
+
 function locationsRoughlyMatch(left, right) {
   const normalizedLeft = normalizeComparableLocation(left ?? "");
   const normalizedRight = normalizeComparableLocation(right ?? "");
@@ -477,14 +498,14 @@ function buildWaypointInfoContent(waypoint, index, route, tripStops, profile) {
       }
       ${
         previousLeg
-          ? `<div style="font-size:12px; margin-bottom:4px;"><strong>Arrive via:</strong> ${escapeHtml(previousLeg.distance_km)} km · ${escapeHtml(Math.round(previousLeg.duration_minutes))} min</div>`
+          ? `<div style="font-size:12px; margin-bottom:4px;"><strong>Arrive via:</strong> ${escapeHtml(formatMiles(previousLeg.distance_km))} · ${escapeHtml(formatDuration(previousLeg.duration_minutes))}</div>`
           : route
-            ? `<div style="font-size:12px; margin-bottom:4px;"><strong>Total route:</strong> ${escapeHtml(route.total_distance_km)} km · ${escapeHtml(Math.round(route.total_duration_minutes))} min</div>`
+            ? `<div style="font-size:12px; margin-bottom:4px;"><strong>Total route:</strong> ${escapeHtml(formatMiles(route.total_distance_km))} · ${escapeHtml(formatDuration(route.total_duration_minutes))}</div>`
             : ""
       }
       ${
         nextLeg
-          ? `<div style="font-size:12px; margin-bottom:6px;"><strong>Next leg:</strong> ${escapeHtml(nextLeg.distance_km)} km · ${escapeHtml(Math.round(nextLeg.duration_minutes))} min</div>`
+          ? `<div style="font-size:12px; margin-bottom:6px;"><strong>Next leg:</strong> ${escapeHtml(formatMiles(nextLeg.distance_km))} · ${escapeHtml(formatDuration(nextLeg.duration_minutes))}</div>`
           : ""
       }
       ${
@@ -1069,7 +1090,7 @@ function TripMap({
         </div>
         {hasRoute && (
           <p>
-            {activeRoute.total_distance_km} km • {activeRoute.total_duration_minutes} min
+            {formatMiles(activeRoute.total_distance_km)} • {formatDuration(activeRoute.total_duration_minutes)}
           </p>
         )}
       </div>
@@ -1139,7 +1160,7 @@ function TripMap({
                     {activeRoute && (
                       <div className="route-stop-tooltip-stat">
                         <span>Total route</span>
-                        <span>{activeRoute.total_distance_km} km · {Math.round(activeRoute.total_duration_minutes)} min</span>
+                        <span>{formatMiles(activeRoute.total_distance_km)} · {formatDuration(activeRoute.total_duration_minutes)}</span>
                       </div>
                     )}
                   </div>
@@ -1214,13 +1235,13 @@ function TripMap({
                         {leg && (
                           <div className="route-stop-tooltip-stat">
                             <span>Leg distance</span>
-                            <span>{leg.distance_km} km</span>
+                            <span>{formatMiles(leg.distance_km)}</span>
                           </div>
                         )}
                         {leg && (
                           <div className="route-stop-tooltip-stat">
                             <span>Drive time</span>
-                            <span>{Math.round(leg.duration_minutes)} min</span>
+                            <span>{formatDuration(leg.duration_minutes)}</span>
                           </div>
                         )}
                       </div>

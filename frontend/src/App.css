@@ -108,6 +108,14 @@
   font-size: clamp(1.5rem, 2.1vw, 2rem);
 }
 
+.trip-request-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .section-heading-block {
   display: flex;
   flex-direction: column;
@@ -302,7 +310,7 @@
   margin-top: 18px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
 }
 
 .result-card {
@@ -355,6 +363,17 @@
   flex-shrink: 0;
 }
 
+.thread-toggle-button {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.62);
+  color: #dbeafe;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .thread-stats-row {
   display: flex;
   gap: 6px;
@@ -404,6 +423,16 @@
   gap: 6px;
 }
 
+.thread-summary-strip {
+  background-color: rgba(15, 23, 42, 0.46);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .thread-request-label {
   margin: 0;
   color: #7dd3fc;
@@ -418,6 +447,13 @@
   color: #e2e8f0;
   font-size: 14px;
   line-height: 1.6;
+}
+
+.thread-summary-preview {
+  margin: 2px 0 0;
+  color: #94a3b8;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .thread-response-grid {
@@ -756,11 +792,23 @@
   flex-wrap: wrap;
 }
 
+.trip-action-row--compact {
+  justify-content: flex-end;
+}
+
 .trip-action-button {
   margin-top: 0;
   flex: 1;
   min-width: 120px;
   text-align: center;
+}
+
+.trip-action-button--compact {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 7px 10px;
+  font-size: 12px;
+  border-radius: 999px;
 }
 
 .refinement-textarea {
@@ -1008,6 +1056,11 @@
     min-width: 0;
   }
 
+  .trip-request-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
   .map-canvas {
     min-height: 280px;
   }
@@ -1037,6 +1090,14 @@
 
   .roadside-option-item {
     flex-direction: column;
+  }
+
+  .thread-header {
+    flex-direction: column;
+  }
+
+  .thread-header-meta {
+    align-items: flex-start;
   }
 
   .map-layer-list {
