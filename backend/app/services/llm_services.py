@@ -155,24 +155,7 @@ def _promote_recommended_stops(
     return _resequence_trip_stops(next_trip_stops, profile)
 
 
-def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
-    llm_config = get_active_llm_config()
-    if not llm_config.api_key:
-        raise ValueError(f"{llm_config.api_key_env_var} is not set in the environment.")
-
-    if llm_config.provider != "google":
-        raise ValueError(
-            f"{llm_config.provider_label} is configured with model '{llm_config.model or 'not set'}', "
-            "but this backend is currently wired only for the Google tool-calling flow. "
-            "Switch LLM_PROVIDER back to 'google' or extend llm_services.py for that provider."
-        )
-
-    client = genai.Client(api_key=llm_config.api_key)
-    full_prompt = build_full_prompt(
-        trip_request.profile,
-        trip_request.request,
-        trip_request.conversation_history,
-    )
+def _build_tool_handlers(llm_provider_label: str):
     tool_usage = {
         "summaries": [],
     }
@@ -188,18 +171,6 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
         vehicle_type: str,
         is_round_trip: bool = False,
     ) -> dict:
-        """Get Google Maps route distance and duration facts for an ordered road trip.
-
-        Args:
-            start_location: Starting point for the trip.
-            destination: Final destination when the trip is not a round trip.
-            stop_locations: Ordered list of stop locations selected for the itinerary.
-            vehicle_type: Vehicle type from the user profile.
-            is_round_trip: Whether the trip should end where it started.
-
-        Returns:
-            Route totals, leg summaries, and any warnings from Google Maps lookups.
-        """
         result = get_route_tool_context(
             start_location=start_location,
             destination=destination,
@@ -208,12 +179,12 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
             is_round_trip=is_round_trip,
         )
         tool_usage["summaries"].append(
-            "Gemini used the Google Maps route tool."
+            f"{llm_provider_label} used the Google Maps route tool."
         )
         if result.get("route_available"):
             optimized_stop_count = max(len(result.get("optimized_stop_locations", [])) - 1, 0)
             tool_usage["summaries"][-1] = (
-                "Gemini used the Google Maps route and waypoint optimization tool "
+                f"{llm_provider_label} used the Google Maps route and waypoint optimization tool "
                 f"for {len(stop_locations)} planned stops, "
                 f"{result.get('total_distance_km', 0)} km total"
                 + (
@@ -224,7 +195,7 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
             )
         else:
             tool_usage["summaries"][-1] = (
-                "Gemini attempted the Google Maps route tool, but route facts were unavailable."
+                f"{llm_provider_label} attempted the Google Maps route tool, but route facts were unavailable."
             )
         return result
 
@@ -247,21 +218,35 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
 
         if result.get("suggestions_available"):
             tool_usage["summaries"].append(
-                "Gemini used the roadside attractions tool "
+                f"{llm_provider_label} used the roadside attractions tool "
                 f"and found {len(result.get('suggestions', []))} optional stops."
             )
         else:
             tool_usage["summaries"].append(
-                "Gemini attempted the roadside attractions tool, but no suggestions were available."
+                f"{llm_provider_label} attempted the roadside attractions tool, but no suggestions were available."
             )
 
         return result
 
+    return (
+        tool_usage,
+        roadside_tool_result,
+        {
+            "get_route_context": get_route_context,
+            "get_roadside_options": get_roadside_options,
+        },
+    )
+
+
+def _generate_google_content(client: genai.Client, model: str, full_prompt: str, tool_functions: dict) -> str:
     response = client.models.generate_content(
-        model=llm_config.model,
+        model=model,
         contents=full_prompt,
         config=types.GenerateContentConfig(
-            tools=[get_route_context, get_roadside_options],
+            tools=[
+                tool_functions["get_route_context"],
+                tool_functions["get_roadside_options"],
+            ],
             toolConfig=types.ToolConfig(
                 functionCallingConfig=types.FunctionCallingConfig(
                     mode=types.FunctionCallingConfigMode.AUTO,
@@ -269,8 +254,32 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
             ),
         ),
     )
+    return response.text or ""
 
-    generated_plan, warnings = parse_trip_plan(response.text or "", trip_request.profile)
+
+def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
+    llm_config = get_active_llm_config()
+    if not llm_config.api_key:
+        raise ValueError(f"{llm_config.api_key_env_var} is not set in the environment.")
+
+    full_prompt = build_full_prompt(
+        trip_request.profile,
+        trip_request.request,
+        trip_request.conversation_history,
+    )
+    tool_usage, roadside_tool_result, tool_functions = _build_tool_handlers(
+        llm_config.provider_label
+    )
+
+    client = genai.Client(api_key=llm_config.api_key)
+    raw_plan_text = _generate_google_content(
+        client,
+        llm_config.model,
+        full_prompt,
+        tool_functions,
+    )
+
+    generated_plan, warnings = parse_trip_plan(raw_plan_text, trip_request.profile)
     route = None
     enriched_stops = generated_plan.trip_stops
     route_warnings: list[str] = []

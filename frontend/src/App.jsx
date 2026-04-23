@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import LocationAutocompleteInput from "./components/LocationAutocompleteInput";
 import TripMap from "./components/TripMap";
 import "./App.css";
@@ -274,22 +274,11 @@ function App() {
   const [error, setError] = useState("");
   const [tripMapRevision, setTripMapRevision] = useState(0);
   const requestTextareaRef = useRef(null);
+  const hasResponse = responseHistory.length > 0;
 
   function persistProfile(updatedProfile) {
     setProfile(updatedProfile);
     localStorage.setItem("roadTripProfile", JSON.stringify(updatedProfile));
-  }
-
-  function resizeRequestTextarea() {
-    const textarea = requestTextareaRef.current;
-    if (!textarea) {
-      return;
-    }
-
-    textarea.style.height = "0px";
-    const nextHeight = Math.min(Math.max(textarea.scrollHeight, 52), 220);
-    textarea.style.height = `${nextHeight}px`;
-    textarea.style.overflowY = textarea.scrollHeight > 220 ? "auto" : "hidden";
   }
 
   useEffect(() => {
@@ -307,17 +296,17 @@ function App() {
     };
   }, [loading]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const textarea = requestTextareaRef.current;
     if (!textarea) {
       return;
     }
 
-    textarea.style.height = "0px";
+    textarea.style.height = "auto";
     const nextHeight = Math.min(Math.max(textarea.scrollHeight, 52), 220);
     textarea.style.height = `${nextHeight}px`;
     textarea.style.overflowY = textarea.scrollHeight > 220 ? "auto" : "hidden";
-  }, [request]);
+  }, [request, hasResponse]);
 
   function handleProfileChange(event) {
     const { name, type, value, checked } = event.target;
@@ -597,7 +586,6 @@ function App() {
 
   function handleRequestInputChange(event) {
     setRequest(event.target.value);
-    resizeRequestTextarea();
   }
 
   function handleRequestKeyDown(event) {
@@ -625,7 +613,6 @@ function App() {
   const tripMapKey = responseHistory.length
     ? `trip-map-${responseHistory[responseHistory.length - 1].version}-${tripMapRevision}`
     : "trip-map-empty";
-  const hasResponse = responseHistory.length > 0;
   const requestCard = (
     <div className="card trip-request-card">
       <div className="trip-request-header">
@@ -812,7 +799,7 @@ function App() {
               checked={profile.needs_public_water}
               onChange={handleProfileChange}
             />
-            <span>Need access to public water</span>
+            <span>Public water access</span>
           </label>
 
           <label className="label">Travel Style</label>
