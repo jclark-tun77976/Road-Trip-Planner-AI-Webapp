@@ -91,6 +91,44 @@ function buildConversationHistoryPayload(entries) {
   }));
 }
 
+const GOOGLE_MAPS_WAYPOINT_LIMIT = 9;
+
+function resolveGoogleMapsTravelMode(vehicleType) {
+  const normalized = (vehicleType ?? "").trim().toLowerCase();
+  if (normalized === "bicycle") return "bicycling";
+  if (normalized === "hitchhiker") return "walking";
+  return "driving";
+}
+
+function buildGoogleMapsDirectionsUrl(profile, tripStops) {
+  const origin = (profile?.start_location ?? "").trim();
+  if (!origin || !Array.isArray(tripStops) || tripStops.length === 0) {
+    return null;
+  }
+
+  const locations = tripStops
+    .map((stop) => (stop?.location ?? "").trim())
+    .filter(Boolean);
+  if (locations.length === 0) {
+    return null;
+  }
+
+  const destination = locations[locations.length - 1];
+  const waypoints = locations.slice(0, -1).slice(0, GOOGLE_MAPS_WAYPOINT_LIMIT);
+
+  const params = new URLSearchParams({
+    api: "1",
+    origin,
+    destination,
+    travelmode: resolveGoogleMapsTravelMode(profile.vehicle_type),
+  });
+  if (waypoints.length > 0) {
+    params.set("waypoints", waypoints.join("|"));
+  }
+
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
 function normalizeLocation(value = "") {
   return value.trim().toLowerCase();
 }
@@ -1014,6 +1052,35 @@ function App() {
                   <span className="thread-stop-count-pill">
                     {entry.response.trip_stops.length} stops
                   </span>
+                  {(() => {
+                    const googleMapsUrl = buildGoogleMapsDirectionsUrl(
+                      profile,
+                      entry.response.trip_stops,
+                    );
+                    if (!googleMapsUrl) {
+                      return null;
+                    }
+                    const waypointCount = Math.max(
+                      entry.response.trip_stops.length - 1,
+                      0,
+                    );
+                    const truncated = waypointCount > GOOGLE_MAPS_WAYPOINT_LIMIT;
+                    return (
+                      <a
+                        href={googleMapsUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="thread-toggle-button thread-export-button"
+                        title={
+                          truncated
+                            ? `Google Maps accepts up to ${GOOGLE_MAPS_WAYPOINT_LIMIT} waypoints; extra stops were trimmed.`
+                            : "Open this route in Google Maps"
+                        }
+                      >
+                        Open in Google Maps
+                      </a>
+                    );
+                  })()}
                   <button
                     type="button"
                     className="thread-toggle-button"

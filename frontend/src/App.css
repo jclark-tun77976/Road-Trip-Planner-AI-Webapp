@@ -385,6 +385,23 @@
   cursor: pointer;
 }
 
+a.thread-toggle-button {
+  display: inline-block;
+  text-decoration: none;
+  line-height: 1.2;
+}
+
+.thread-export-button {
+  border-color: rgba(59, 130, 246, 0.55);
+  background: rgba(37, 99, 235, 0.22);
+  color: #bfdbfe;
+}
+
+.thread-export-button:hover {
+  background: rgba(37, 99, 235, 0.36);
+  color: #ffffff;
+}
+
 .thread-stats-row {
   display: flex;
   gap: 6px;
