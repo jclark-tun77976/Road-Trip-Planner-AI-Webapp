@@ -1,3 +1,4 @@
+import json
 import re
 
 from dotenv import load_dotenv
@@ -9,6 +10,8 @@ from app.services.mapping_services import (
     build_interest_search_profiles,
     build_route_data,
     get_roadside_suggestions_for_route,
+    get_roadside_tool_context,
+    get_route_tool_context,
 )
 from app.services.model_registry import get_active_llm_config
 from app.services.prompt_services import build_full_prompt
@@ -384,6 +387,174 @@ def _promote_interest_aligned_stop(
     )
 
 
+def _build_tool_handlers(llm_provider_label: str, profile: Profile, route_cache: dict):
+    tool_usage = {
+        "summaries": [],
+        "results": [],
+    }
+    interest_profiles = build_interest_search_profiles(profile.interests)
+
+    def get_route_context(
+        start_location: str,
+        destination: str,
+        stop_locations: list[str],
+        vehicle_type: str,
+        is_round_trip: bool = False,
+    ) -> dict:
+        """Look up Google Maps route distance, duration, legs, and optimized stop order."""
+        result = get_route_tool_context(
+            start_location=start_location,
+            destination=destination,
+            stop_locations=stop_locations,
+            vehicle_type=vehicle_type,
+            is_round_trip=is_round_trip,
+            route_cache=route_cache,
+        )
+        tool_usage["results"].append(
+            {
+                "tool": "get_route_context",
+                "arguments": {
+                    "start_location": start_location,
+                    "destination": destination,
+                    "stop_locations": stop_locations,
+                    "vehicle_type": vehicle_type,
+                    "is_round_trip": is_round_trip,
+                },
+                "result": result,
+            }
+        )
+
+        if result.get("route_available"):
+            tool_usage["summaries"].append(
+                f"{llm_provider_label} called get_route_context and received "
+                f"{result.get('total_distance_km', 0)} km / "
+                f"{result.get('total_duration_minutes', 0)} min route facts."
+            )
+        else:
+            tool_usage["summaries"].append(
+                f"{llm_provider_label} called get_route_context, but route facts were unavailable."
+            )
+
+        return result
+
+    def get_roadside_options(
+        start_location: str,
+        destination: str,
+        stop_locations: list[str],
+        vehicle_type: str,
+        is_round_trip: bool = False,
+    ) -> dict:
+        """Look up optional route-adjacent Places suggestions, including profile interests."""
+        result = get_roadside_tool_context(
+            start_location=start_location,
+            destination=destination,
+            stop_locations=stop_locations,
+            vehicle_type=vehicle_type,
+            is_round_trip=is_round_trip,
+            route_cache=route_cache,
+            extra_search_profiles=interest_profiles,
+            recommendation_radius_miles=profile.recommendation_radius_miles,
+        )
+        suggestions = result.get("suggestions", [])
+        tool_usage["results"].append(
+            {
+                "tool": "get_roadside_options",
+                "arguments": {
+                    "start_location": start_location,
+                    "destination": destination,
+                    "stop_locations": stop_locations,
+                    "vehicle_type": vehicle_type,
+                    "is_round_trip": is_round_trip,
+                },
+                "result": result,
+            }
+        )
+
+        if result.get("suggestions_available"):
+            tool_usage["summaries"].append(
+                f"{llm_provider_label} called get_roadside_options and received "
+                f"{len(suggestions)} optional route-adjacent stops."
+            )
+        else:
+            tool_usage["summaries"].append(
+                f"{llm_provider_label} called get_roadside_options, but no route-adjacent stops were available."
+            )
+
+        return result
+
+    return (
+        tool_usage,
+        {
+            "get_route_context": get_route_context,
+            "get_roadside_options": get_roadside_options,
+        },
+    )
+
+
+def _generate_tool_calling_context(
+    client: genai.Client,
+    model: str,
+    full_prompt: str,
+    tool_functions: dict,
+) -> str:
+    tool_prompt = f"""{full_prompt}
+
+Tool-calling step:
+Decide whether Google Maps route facts or route-adjacent Places options would
+improve this road trip plan. For normal route planning, call get_route_context
+with your proposed ordered intermediate stop locations. If the user asks for
+recommended stops or their interests should shape stops, you may also call
+get_roadside_options. After any tool calls, reply with a short plain-text note.
+Do not return the final JSON in this step.
+"""
+    config_kwargs = {
+        "tools": [
+            tool_functions["get_route_context"],
+            tool_functions["get_roadside_options"],
+        ],
+        "tool_config": types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode=types.FunctionCallingConfigMode.AUTO,
+            )
+        ),
+        "automatic_function_calling": types.AutomaticFunctionCallingConfig(
+            maximum_remote_calls=3,
+        ),
+        "temperature": 0.2,
+        "max_output_tokens": 512,
+    }
+    try:
+        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    except AttributeError:
+        pass
+
+    response = client.models.generate_content(
+        model=model,
+        contents=tool_prompt,
+        config=types.GenerateContentConfig(**config_kwargs),
+    )
+    return response.text or ""
+
+
+def _build_tool_augmented_prompt(full_prompt: str, tool_usage: dict) -> str:
+    tool_results = tool_usage.get("results", [])
+    if not tool_results:
+        return full_prompt
+
+    compact_results = json.dumps(tool_results, ensure_ascii=True, indent=2)
+    return f"""{full_prompt}
+
+Tool results selected by the LLM:
+{compact_results}
+
+Use these tool results in the final JSON whenever they are relevant. Incorporate
+available route distance, duration, leg order, optimized stop order, warnings,
+and roadside options into summary, recommendations, budget_notes, trip_stops,
+and roadside_options. If a tool result reports unavailable data, do not
+apologize; continue with a useful itinerary grounded in the profile.
+"""
+
+
 def _generate_google_content(client: genai.Client, model: str, full_prompt: str) -> str:
     # Gemini 2.5 has "thinking" turned on by default; for a structured-output
     # JSON task the extra reasoning tokens dominate latency. Disabling it keeps
@@ -428,24 +599,51 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
     )
     tool_usage = {
         "summaries": [],
+        "results": [],
     }
     route_cache: dict = {}
     interest_profiles = build_interest_search_profiles(trip_request.profile.interests)
 
     warnings: list[str] = []
     raw_plan_text = ""
+    final_prompt = full_prompt
 
     try:
         client = genai.Client(api_key=llm_config.api_key)
-        raw_plan_text = _generate_google_content(
-            client,
-            llm_config.model,
-            full_prompt,
-        )
     except Exception as exc:
         # Surface a readable message but keep going with the fallback plan so
         # the UI can still render profile-based stops and the user's inputs.
-        warnings.append(f"{llm_config.provider_label} model call failed: {exc}")
+        warnings.append(f"{llm_config.provider_label} client setup failed: {exc}")
+        client = None
+
+    if client is not None:
+        try:
+            tool_usage, tool_functions = _build_tool_handlers(
+                llm_config.provider_label,
+                trip_request.profile,
+                route_cache,
+            )
+            _generate_tool_calling_context(
+                client,
+                llm_config.model,
+                full_prompt,
+                tool_functions,
+            )
+            final_prompt = _build_tool_augmented_prompt(full_prompt, tool_usage)
+        except Exception as exc:
+            warnings.append(f"{llm_config.provider_label} tool-calling step failed: {exc}")
+
+    if client is not None:
+        try:
+            raw_plan_text = _generate_google_content(
+                client,
+                llm_config.model,
+                final_prompt,
+            )
+        except Exception as exc:
+            # Surface a readable message but keep going with the fallback plan so
+            # the UI can still render profile-based stops and the user's inputs.
+            warnings.append(f"{llm_config.provider_label} model call failed: {exc}")
 
     generated_plan, parse_warnings = parse_trip_plan(raw_plan_text, trip_request.profile)
     warnings.extend(parse_warnings)
@@ -563,6 +761,8 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
                     f"{exc}"
                 )
 
+    llm_tool_calling_used = bool(tool_usage["results"])
+
     return TripResponse(
         summary=generated_plan.summary,
         recommendations=generated_plan.recommendations,
@@ -571,7 +771,7 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
         roadside_options=roadside_options,
         route=route,
         warnings=warnings + route_warnings + roadside_warnings,
-        tool_calling_used=bool(tool_usage["summaries"]),
+        tool_calling_used=llm_tool_calling_used,
         tool_calling_summary=" ".join(tool_usage["summaries"]),
-        prompt_used=full_prompt,
+        prompt_used=final_prompt,
     )
