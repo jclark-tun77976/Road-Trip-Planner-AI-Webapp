@@ -14,8 +14,15 @@ load_dotenv()
 def create_plan(data: TripRequest):
     try:
         return generate_trip_plan(data)
+    except ValueError as exc:
+        # Configuration / validation problems surface as readable 400s so the
+        # frontend can show a specific message instead of a generic failure.
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"The trip planner hit an unexpected error: {exc}",
+        )
 
 
 @router.get("/debug/keys")

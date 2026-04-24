@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 
@@ -9,9 +10,17 @@ GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 PLACES_NEARBY_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
 REQUEST_TIMEOUT = 20.0
-ROADISDE_SAMPLE_POINTS = 5
-ROADSIDE_SEARCH_RADIUS_METERS = 15000
+ROADISDE_SAMPLE_POINTS = 3
+DEFAULT_ROADSIDE_SEARCH_RADIUS_METERS = 15000
+MAX_ROADSIDE_SEARCH_RADIUS_METERS = 50000
 MAX_ROADSIDE_OPTIONS = 5
+GEOCODE_WORKERS = 8
+ROADSIDE_WORKERS = 8
+
+# Module-level cache: normalized location string -> (lat, lng). Geocoding is
+# deterministic for the lifetime of the process, so the same location seen
+# across tool calls and the final route build only hits Google once.
+_GEOCODE_CACHE: dict[str, tuple[float, float]] = {}
 ROUTES_FIELD_MASK = ",".join(
     [
         "routes.distanceMeters",
@@ -44,12 +53,56 @@ ROADSIDE_SEARCH_PROFILES = [
         "type": "museum",
         "keyword": "odd museum",
     },
-    {
-        "label": "Giant roadside art",
-        "type": "tourist_attraction",
-        "keyword": "giant statue",
-    },
 ]
+
+
+# Profiles that get added to the roadside scan when the user's interests
+# mention specific activities. This is what makes the LLM tool context
+# include real hiking trails (etc.) to choose from.
+INTEREST_SEARCH_PROFILES = {
+    r"hik|trail|nature|outdoor|waterfall|mountain": [
+        {"label": "Hiking trail", "type": "park", "keyword": "hiking trail"},
+        {"label": "Nature preserve", "type": "park", "keyword": "nature preserve"},
+        {"label": "State park", "type": "park", "keyword": "state park"},
+    ],
+    r"\bfood\b|restaurant|cuisine|eat|culinary|diner": [
+        {"label": "Notable restaurant", "type": "restaurant", "keyword": "local favorite"},
+    ],
+    r"live music|concert|\bmusic\b|jazz|blues": [
+        {"label": "Live music venue", "type": "establishment", "keyword": "live music venue"},
+    ],
+    r"nightlife|brewery|brew pub": [
+        {"label": "Brewery", "type": "bar", "keyword": "brewery"},
+    ],
+    r"history|historic|civil war|battlefield": [
+        {"label": "Historic site", "type": "tourist_attraction", "keyword": "historic site"},
+    ],
+    r"beach|coast|ocean|shore": [
+        {"label": "Beach", "type": "tourist_attraction", "keyword": "beach"},
+    ],
+}
+
+
+def build_interest_search_profiles(interests: str) -> list[dict]:
+    """Return extra Places-search profiles based on a user's interests string."""
+    if not interests:
+        return []
+
+    import re
+
+    normalized = interests.lower()
+    extras: list[dict] = []
+    seen_labels: set[str] = set()
+
+    for pattern, profiles in INTEREST_SEARCH_PROFILES.items():
+        if re.search(pattern, normalized):
+            for profile in profiles:
+                if profile["label"] in seen_labels:
+                    continue
+                seen_labels.add(profile["label"])
+                extras.append(profile)
+
+    return extras
 
 
 class GoogleMapsConfigurationError(ValueError):
@@ -61,51 +114,116 @@ def build_route_data(
     destination: str,
     trip_stops: list[TripStop],
     vehicle_type: str,
+    *,
+    route_cache: dict | None = None,
 ) -> tuple[RouteData | None, list[TripStop], list[str]]:
     api_key = os.getenv("GOOGLE_MAPS_API_KEY")
     if not api_key:
         raise ValueError("GOOGLE_MAPS_API_KEY is not set in the environment.")
 
-    warnings: list[str] = []
     route_inputs = _build_route_inputs(start_location, destination, trip_stops)
+    mode = _resolve_travel_mode(vehicle_type)
+    cache_key = _make_route_cache_key(route_inputs, mode)
+
+    # Cache hit: reuse the previously-computed route (and its waypoints) and
+    # only do the cheap stop-enrichment against this caller's trip_stops.
+    if route_cache is not None and cache_key in route_cache:
+        cached_route, cached_waypoints, cached_warnings = route_cache[cache_key]
+        if cached_route is None:
+            return None, _attach_stop_coordinates(trip_stops, cached_waypoints), list(cached_warnings)
+
+        enriched_stops = _attach_stop_coordinates(trip_stops, cached_waypoints)
+        enriched_stops = _reorder_trip_stops_to_route(enriched_stops, cached_waypoints)
+        return cached_route, enriched_stops, list(cached_warnings)
+
+    warnings: list[str] = []
 
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
-        geocoded_waypoints: list[RouteWaypoint] = []
+        # Parallelize geocoding so 5 stops aren't 5 serial HTTP calls.
+        geocode_results: list[tuple[int, dict, float, float] | None] = [None] * len(route_inputs)
+        config_error: GoogleMapsConfigurationError | None = None
 
-        for index, route_input in enumerate(route_inputs, start=1):
-            try:
-                latitude, longitude = geocode_location(client, route_input["location"], api_key)
-            except GoogleMapsConfigurationError as exc:
-                warnings.append(str(exc))
-                return None, _attach_stop_coordinates(trip_stops, geocoded_waypoints), warnings
-            except Exception as exc:
-                warnings.append(f"Could not geocode '{route_input['location']}': {exc}")
-                continue
+        with ThreadPoolExecutor(max_workers=min(len(route_inputs), GEOCODE_WORKERS) or 1) as executor:
+            future_to_index = {
+                executor.submit(geocode_location, client, ri["location"], api_key): (idx, ri)
+                for idx, ri in enumerate(route_inputs, start=1)
+            }
+            for future in as_completed(future_to_index):
+                position, route_input = future_to_index[future]
+                try:
+                    latitude, longitude = future.result()
+                except GoogleMapsConfigurationError as exc:
+                    # Remember the config error; keep draining the pool so it
+                    # exits cleanly before we return.
+                    config_error = exc
+                except Exception as exc:
+                    warnings.append(f"Could not geocode '{route_input['location']}': {exc}")
+                else:
+                    geocode_results[position - 1] = (position, route_input, latitude, longitude)
 
-            geocoded_waypoints.append(
-                RouteWaypoint(
-                    order=index,
-                    name=route_input["name"],
-                    location=route_input["location"],
-                    kind=route_input["kind"],
-                    latitude=latitude,
-                    longitude=longitude,
-                )
-            )
+        if config_error is not None:
+            warnings.append(str(config_error))
+            partial_waypoints = _collect_successful_waypoints(geocode_results)
+            result = (None, partial_waypoints, warnings)
+            if route_cache is not None:
+                route_cache[cache_key] = result
+            return None, _attach_stop_coordinates(trip_stops, partial_waypoints), warnings
+
+        geocoded_waypoints = _collect_successful_waypoints(geocode_results)
 
         if len(geocoded_waypoints) < 2:
             warnings.append("Not enough route points could be geocoded to build a Google Maps route.")
+            result = (None, geocoded_waypoints, warnings)
+            if route_cache is not None:
+                route_cache[cache_key] = result
             return None, _attach_stop_coordinates(trip_stops, geocoded_waypoints), warnings
 
-        route_data = fetch_route(client, geocoded_waypoints, _resolve_travel_mode(vehicle_type), api_key)
+        route_data = fetch_route(client, geocoded_waypoints, mode, api_key)
+
+        if route_cache is not None:
+            route_cache[cache_key] = (route_data, route_data.waypoints, list(warnings))
+
         enriched_stops = _attach_stop_coordinates(trip_stops, route_data.waypoints)
         enriched_stops = _reorder_trip_stops_to_route(enriched_stops, route_data.waypoints)
         return route_data, enriched_stops, warnings
 
 
+def _collect_successful_waypoints(
+    geocode_results: list[tuple[int, dict, float, float] | None],
+) -> list[RouteWaypoint]:
+    return [
+        RouteWaypoint(
+            order=position,
+            name=route_input["name"],
+            location=route_input["location"],
+            kind=route_input["kind"],
+            latitude=latitude,
+            longitude=longitude,
+        )
+        for result in geocode_results
+        if result is not None
+        for position, route_input, latitude, longitude in (result,)
+    ]
+
+
+def _make_route_cache_key(route_inputs: list[dict], mode: str) -> tuple:
+    return (
+        tuple(
+            (ri["kind"], _normalize_comparable_location(ri["location"]))
+            for ri in route_inputs
+        ),
+        mode,
+    )
+
+
 def geocode_location(client: httpx.Client, location: str, api_key: str) -> tuple[float, float]:
     if not _is_geocodable_location(location):
         raise ValueError("Skipped empty or placeholder location")
+
+    cache_key = _normalize_comparable_location(location)
+    cached = _GEOCODE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     response = client.get(
         GEOCODE_URL,
@@ -129,7 +247,9 @@ def geocode_location(client: httpx.Client, location: str, api_key: str) -> tuple
 
     first_result = payload["results"][0]
     geometry = first_result["geometry"]["location"]
-    return float(geometry["lat"]), float(geometry["lng"])
+    coordinates = float(geometry["lat"]), float(geometry["lng"])
+    _GEOCODE_CACHE[cache_key] = coordinates
+    return coordinates
 
 
 def fetch_route(
@@ -162,15 +282,16 @@ def fetch_route(
     )
     response.raise_for_status()
     payload = response.json()
-    routes = payload.get("routes", [])
-    if not routes:
-        raise ValueError(payload.get("error", {}).get("message", "Unknown routing error"))
 
     if payload.get("error", {}).get("status") == "PERMISSION_DENIED":
         raise GoogleMapsConfigurationError(
             "Google Maps Routes API returned PERMISSION_DENIED. "
             "Enable Routes API and allow this key for backend/server requests."
         )
+
+    routes = payload.get("routes", [])
+    if not routes:
+        raise ValueError(payload.get("error", {}).get("message", "Unknown routing error"))
 
     route = routes[0]
     ordered_waypoints = _reorder_waypoints_from_routes_response(
@@ -327,6 +448,7 @@ def get_route_tool_context(
     stop_locations: list[str],
     vehicle_type: str,
     is_round_trip: bool = False,
+    route_cache: dict | None = None,
 ) -> dict:
     """Return Google Maps route facts for an ordered trip itinerary.
 
@@ -363,6 +485,7 @@ def get_route_tool_context(
             destination=final_destination,
             trip_stops=synthetic_stops,
             vehicle_type=vehicle_type,
+            route_cache=route_cache,
         )
     except Exception as exc:
         return {
@@ -406,6 +529,9 @@ def get_roadside_tool_context(
     stop_locations: list[str],
     vehicle_type: str,
     is_round_trip: bool = False,
+    route_cache: dict | None = None,
+    extra_search_profiles: list[dict] | None = None,
+    recommendation_radius_miles: int | None = None,
 ) -> dict:
     """Return optional roadside attraction suggestions along the route."""
     cleaned_stop_locations = [
@@ -431,6 +557,7 @@ def get_roadside_tool_context(
             destination=final_destination,
             trip_stops=synthetic_stops,
             vehicle_type=vehicle_type,
+            route_cache=route_cache,
         )
     except Exception as exc:
         return {
@@ -447,7 +574,11 @@ def get_roadside_tool_context(
         }
 
     try:
-        suggestions, suggestion_warnings = get_roadside_suggestions_for_route(route_data)
+        suggestions, suggestion_warnings = get_roadside_suggestions_for_route(
+            route_data,
+            extra_search_profiles=extra_search_profiles,
+            recommendation_radius_miles=recommendation_radius_miles,
+        )
     except Exception as exc:
         return {
             "suggestions_available": False,
@@ -462,33 +593,77 @@ def get_roadside_tool_context(
     }
 
 
-def get_roadside_suggestions_for_route(route_data: RouteData) -> tuple[list[RoadsideOption], list[str]]:
+def get_roadside_suggestions_for_route(
+    route_data: RouteData,
+    extra_search_profiles: list[dict] | None = None,
+    recommendation_radius_miles: int | None = None,
+) -> tuple[list[RoadsideOption], list[str]]:
     api_key = os.getenv("GOOGLE_MAPS_API_KEY")
     if not api_key:
         raise ValueError("GOOGLE_MAPS_API_KEY is not set in the environment.")
 
     warnings: list[str] = []
     suggestion_lookup: dict[str, RoadsideOption] = {}
+    suggestion_scores: dict[str, tuple[int, float]] = {}
     sampled_points = _sample_route_points(route_data)
+    requested_radius_meters = (
+        round(recommendation_radius_miles * 1609.34)
+        if recommendation_radius_miles and recommendation_radius_miles > 0
+        else None
+    )
+    search_radius_meters = _resolve_roadside_search_radius_meters(recommendation_radius_miles)
 
     if not sampled_points:
         return [], ["No route points were available for roadside suggestions."]
 
+    if requested_radius_meters and requested_radius_meters > search_radius_meters:
+        warnings.append(
+            "Roadside search radius was capped at 50 km because Google Places Nearby Search "
+            "does not support larger values."
+        )
+
+    active_profiles = list(ROADSIDE_SEARCH_PROFILES)
+    extra_profile_labels = set()
+    if extra_search_profiles:
+        seen_labels = {profile["label"] for profile in active_profiles}
+        for profile in extra_search_profiles:
+            if profile["label"] in seen_labels:
+                continue
+            active_profiles.append(profile)
+            seen_labels.add(profile["label"])
+            extra_profile_labels.add(profile["label"])
+
+    search_tasks = [
+        (sampled_point, profile)
+        for sampled_point in sampled_points
+        for profile in active_profiles
+    ]
+
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
-        for sampled_point in sampled_points:
-            for profile in ROADSIDE_SEARCH_PROFILES:
-                response = client.get(
-                    PLACES_NEARBY_URL,
-                    params={
-                        "location": _to_lat_lng_string(sampled_point.latitude, sampled_point.longitude),
-                        "radius": ROADSIDE_SEARCH_RADIUS_METERS,
-                        "type": profile["type"],
-                        "keyword": profile["keyword"],
-                        "key": api_key,
-                    },
-                )
-                response.raise_for_status()
-                payload = response.json()
+        def run_search(task: tuple) -> tuple[dict, dict]:
+            sampled_point, profile = task
+            params = {
+                "location": _to_lat_lng_string(sampled_point.latitude, sampled_point.longitude),
+                "radius": search_radius_meters,
+                "type": profile["type"],
+                "keyword": profile["keyword"],
+                "key": api_key,
+            }
+            response = client.get(PLACES_NEARBY_URL, params=params)
+            response.raise_for_status()
+            return profile, response.json()
+
+        # Fan out the sample-point × profile grid in parallel — this is the
+        # biggest chunk of wall-clock time in a roadside scan.
+        with ThreadPoolExecutor(max_workers=min(len(search_tasks), ROADSIDE_WORKERS) or 1) as executor:
+            futures = [executor.submit(run_search, task) for task in search_tasks]
+            for future in as_completed(futures):
+                try:
+                    profile, payload = future.result()
+                except Exception as exc:
+                    warnings.append(f"Roadside search failed: {exc}")
+                    continue
+
                 status = payload.get("status", "Unknown Places error")
 
                 if status == "REQUEST_DENIED":
@@ -503,7 +678,7 @@ def get_roadside_suggestions_for_route(route_data: RouteData) -> tuple[list[Road
 
                 for place in payload.get("results", []):
                     place_id = place.get("place_id")
-                    if not place_id or place_id in suggestion_lookup:
+                    if not place_id:
                         continue
 
                     name = str(place.get("name", "")).strip()
@@ -511,20 +686,33 @@ def get_roadside_suggestions_for_route(route_data: RouteData) -> tuple[list[Road
                     if not name or not location:
                         continue
 
-                    rating = place.get("rating")
+                    rating_value = place.get("rating")
+                    parsed_rating = float(rating_value) if isinstance(rating_value, (int, float)) else None
+                    candidate_score = (
+                        1 if profile["label"] in extra_profile_labels else 0,
+                        parsed_rating if parsed_rating is not None else 0.0,
+                    )
+                    existing_score = suggestion_scores.get(place_id, (-1, -1.0))
+                    if candidate_score < existing_score:
+                        continue
+
                     suggestion_lookup[place_id] = RoadsideOption(
                         name=name,
                         location=location,
                         category=_categorize_roadside_place(place, profile["label"]),
-                        reason=_build_roadside_reason(profile["label"], rating),
-                        rating=float(rating) if isinstance(rating, (int, float)) else None,
+                        reason=_build_roadside_reason(profile["label"], rating_value),
+                        rating=parsed_rating,
                     )
+                    suggestion_scores[place_id] = candidate_score
 
-    suggestions = sorted(
-        suggestion_lookup.values(),
-        key=lambda suggestion: suggestion.rating if suggestion.rating is not None else 0,
-        reverse=True,
-    )[:MAX_ROADSIDE_OPTIONS]
+    suggestions = [
+        suggestion
+        for _, suggestion in sorted(
+            suggestion_lookup.items(),
+            key=lambda item: suggestion_scores.get(item[0], (0, 0.0)),
+            reverse=True,
+        )[:MAX_ROADSIDE_OPTIONS]
+    ]
 
     return suggestions, warnings
 
@@ -669,6 +857,14 @@ def _resolve_travel_mode(vehicle_type: str) -> str:
 
 def _to_lat_lng_string(latitude: float, longitude: float) -> str:
     return f"{latitude},{longitude}"
+
+
+def _resolve_roadside_search_radius_meters(recommendation_radius_miles: int | None) -> int:
+    if recommendation_radius_miles is None or recommendation_radius_miles <= 0:
+        return DEFAULT_ROADSIDE_SEARCH_RADIUS_METERS
+
+    requested_radius_meters = round(recommendation_radius_miles * 1609.34)
+    return min(max(requested_radius_meters, 1), MAX_ROADSIDE_SEARCH_RADIUS_METERS)
 
 
 def _sample_route_points(route_data: RouteData) -> list[Coordinate]:

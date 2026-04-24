@@ -1,11 +1,13 @@
+import json
 import re
 
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from app.models.trip_models import Profile, TripRequest, TripResponse, TripStop
+from app.models.trip_models import Profile, RoadsideOption, TripRequest, TripResponse, TripStop
 from app.services.mapping_services import (
+    build_interest_search_profiles,
     build_route_data,
     get_roadside_suggestions_for_route,
     get_roadside_tool_context,
@@ -18,6 +20,52 @@ from app.services.trip_parser import parse_trip_plan
 
 load_dotenv()
 
+TRIP_PLAN_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "recommendations": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "budget_notes": {"type": "string"},
+        "trip_stops": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "day": {"type": "integer"},
+                    "order": {"type": "integer"},
+                    "name": {"type": "string"},
+                    "location": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["day", "order", "name", "location", "reason"],
+            },
+        },
+        "roadside_options": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "location": {"type": "string"},
+                    "category": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["name", "location", "category", "reason"],
+            },
+        },
+    },
+    "required": [
+        "summary",
+        "recommendations",
+        "budget_notes",
+        "trip_stops",
+        "roadside_options",
+    ],
+}
+
 
 AUTO_ADD_STOP_PATTERNS = (
     r"\bstops?\b",
@@ -29,6 +77,45 @@ AUTO_ADD_STOP_PATTERNS = (
     r"\bdetours?\b",
     r"\bscenic\b",
     r"\battractions?\b",
+)
+NO_STOP_REQUEST_PATTERNS = (
+    r"\bno stops?\b",
+    r"\bdirect route\b",
+    r"\bstraight through\b",
+    r"\bnon[- ]?stop\b",
+)
+INTEREST_SPLIT_PATTERN = re.compile(r"[,;/]|\band\b|\b&\b", flags=re.IGNORECASE)
+INTEREST_ALIGNMENT_RULES = (
+    (
+        re.compile(r"hik|trail|nature|outdoor|waterfall|mountain", flags=re.IGNORECASE),
+        re.compile(
+            r"hik|trail|trailhead|state park|national park|nature preserve|waterfall|mountain|outdoor|park",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    (
+        re.compile(r"\bfood\b|restaurant|cuisine|eat|culinary|diner", flags=re.IGNORECASE),
+        re.compile(
+            r"restaurant|food|diner|bbq|barbecue|cafe|bakery|eatery|brewery|culinary",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    (
+        re.compile(r"live music|concert|\bmusic\b|jazz|blues", flags=re.IGNORECASE),
+        re.compile(r"live music|music venue|concert|jazz|blues|amphitheater", flags=re.IGNORECASE),
+    ),
+    (
+        re.compile(r"nightlife|brewery|brew pub", flags=re.IGNORECASE),
+        re.compile(r"nightlife|brewery|bar|club|cocktail|taproom", flags=re.IGNORECASE),
+    ),
+    (
+        re.compile(r"history|historic|civil war|battlefield", flags=re.IGNORECASE),
+        re.compile(r"history|historic|battlefield|museum|monument|heritage", flags=re.IGNORECASE),
+    ),
+    (
+        re.compile(r"beach|coast|ocean|shore", flags=re.IGNORECASE),
+        re.compile(r"beach|coast|ocean|shore|boardwalk", flags=re.IGNORECASE),
+    ),
 )
 
 
@@ -84,6 +171,39 @@ def _should_auto_add_recommended_stops(
     return _get_trip_length_days(profile) > 1
 
 
+def _user_requested_no_stops(request_text: str) -> bool:
+    normalized_request = request_text.lower()
+    return any(re.search(pattern, normalized_request) for pattern in NO_STOP_REQUEST_PATTERNS)
+
+
+def _split_interests(interests: str) -> list[str]:
+    if not interests:
+        return []
+
+    return [
+        piece.strip()
+        for piece in INTEREST_SPLIT_PATTERN.split(interests)
+        if piece.strip()
+    ]
+
+
+def _get_interest_stop_patterns(interests: str) -> list[re.Pattern[str]]:
+    patterns: list[re.Pattern[str]] = []
+    seen_patterns: set[str] = set()
+
+    for interest_item in _split_interests(interests):
+        for interest_pattern, stop_pattern in INTEREST_ALIGNMENT_RULES:
+            if not interest_pattern.search(interest_item):
+                continue
+            if stop_pattern.pattern in seen_patterns:
+                break
+            seen_patterns.add(stop_pattern.pattern)
+            patterns.append(stop_pattern)
+            break
+
+    return patterns
+
+
 def _resequence_trip_stops(trip_stops: list[TripStop], profile: Profile) -> list[TripStop]:
     trip_length_days = _get_trip_length_days(profile)
     resequenced_stops: list[TripStop] = []
@@ -101,12 +221,15 @@ def _resequence_trip_stops(trip_stops: list[TripStop], profile: Profile) -> list
     return resequenced_stops
 
 
-def _promote_recommended_stops(
+def _promote_options_into_trip_stops(
     trip_stops: list[TripStop],
-    roadside_options,
+    candidate_options: list[RoadsideOption],
     profile: Profile,
+    *,
+    max_promoted_stops: int,
+    reason_prefix: str,
 ) -> list[TripStop]:
-    if not roadside_options:
+    if not candidate_options:
         return trip_stops
 
     normalized_start = _normalize_location(profile.start_location)
@@ -118,10 +241,9 @@ def _promote_recommended_stops(
     existing_locations.add(normalized_start)
     existing_locations.add(normalized_destination)
 
-    max_promoted_stops = min(max(_get_trip_length_days(profile) - 2, 1), 3)
     promoted_stops: list[TripStop] = []
 
-    for option in roadside_options:
+    for option in candidate_options:
         normalized_option_location = _normalize_location(option.location)
         if not normalized_option_location or normalized_option_location in existing_locations:
             continue
@@ -132,7 +254,7 @@ def _promote_recommended_stops(
                 order=1,
                 name=option.name,
                 location=option.location,
-                reason=f"Recommended stop on the way: {option.reason}",
+                reason=f"{reason_prefix}{option.reason}",
             )
         )
         existing_locations.add(normalized_option_location)
@@ -155,14 +277,122 @@ def _promote_recommended_stops(
     return _resequence_trip_stops(next_trip_stops, profile)
 
 
-def _build_tool_handlers(llm_provider_label: str):
+def _promote_recommended_stops(
+    trip_stops: list[TripStop],
+    roadside_options: list[RoadsideOption],
+    profile: Profile,
+) -> list[TripStop]:
+    return _promote_options_into_trip_stops(
+        trip_stops,
+        roadside_options,
+        profile,
+        max_promoted_stops=min(max(_get_trip_length_days(profile) - 2, 1), 3),
+        reason_prefix="Recommended stop on the way: ",
+    )
+
+
+def _has_interest_aligned_stop(trip_stops: list[TripStop], profile: Profile) -> bool:
+    stop_patterns = _get_interest_stop_patterns(profile.interests)
+    if not stop_patterns:
+        return False
+
+    normalized_start = _normalize_location(profile.start_location)
+    normalized_destination = _normalize_location(profile.destination)
+
+    for stop in trip_stops:
+        normalized_location = _normalize_location(stop.location)
+        if normalized_location in {normalized_start, normalized_destination}:
+            continue
+
+        combined_text = f"{stop.name} {stop.location} {stop.reason}"
+        if any(pattern.search(combined_text) for pattern in stop_patterns):
+            return True
+
+    return False
+
+
+def _select_interest_aligned_options(
+    roadside_options: list[RoadsideOption],
+    profile: Profile,
+) -> list[RoadsideOption]:
+    stop_patterns = _get_interest_stop_patterns(profile.interests)
+    if not stop_patterns:
+        return []
+
+    ranked_options: list[tuple[int, float, RoadsideOption]] = []
+
+    for option in roadside_options:
+        combined_text = f"{option.name} {option.location} {option.category} {option.reason}"
+        matched_index = next(
+            (
+                index
+                for index, pattern in enumerate(stop_patterns)
+                if pattern.search(combined_text)
+            ),
+            None,
+        )
+        if matched_index is None:
+            continue
+
+        ranked_options.append(
+            (
+                matched_index,
+                -(option.rating if option.rating is not None else 0.0),
+                option,
+            )
+        )
+
+    ranked_options.sort(key=lambda item: (item[0], item[1]))
+    return [option for _, _, option in ranked_options]
+
+
+def _merge_roadside_options(
+    existing_options: list[RoadsideOption],
+    new_options: list[RoadsideOption],
+) -> list[RoadsideOption]:
+    merged_options = list(existing_options)
+    seen_locations = {
+        _normalize_location(option.location)
+        for option in merged_options
+    }
+
+    for option in new_options:
+        normalized_location = _normalize_location(option.location)
+        if not normalized_location or normalized_location in seen_locations:
+            continue
+        merged_options.append(option)
+        seen_locations.add(normalized_location)
+
+    return merged_options[:5]
+
+
+def _promote_interest_aligned_stop(
+    trip_stops: list[TripStop],
+    roadside_options: list[RoadsideOption],
+    profile: Profile,
+) -> list[TripStop]:
+    if _get_trip_length_days(profile) <= 1 or _has_interest_aligned_stop(trip_stops, profile):
+        return trip_stops
+
+    candidate_options = _select_interest_aligned_options(roadside_options, profile)
+    if not candidate_options:
+        return trip_stops
+
+    return _promote_options_into_trip_stops(
+        trip_stops,
+        candidate_options[:1],
+        profile,
+        max_promoted_stops=1,
+        reason_prefix="Interest-matched stop: ",
+    )
+
+
+def _build_tool_handlers(llm_provider_label: str, profile: Profile, route_cache: dict):
     tool_usage = {
         "summaries": [],
+        "results": [],
     }
-    roadside_tool_result = {
-        "suggestions": [],
-        "warnings": [],
-    }
+    interest_profiles = build_interest_search_profiles(profile.interests)
 
     def get_route_context(
         start_location: str,
@@ -171,32 +401,40 @@ def _build_tool_handlers(llm_provider_label: str):
         vehicle_type: str,
         is_round_trip: bool = False,
     ) -> dict:
+        """Look up Google Maps route distance, duration, legs, and optimized stop order."""
         result = get_route_tool_context(
             start_location=start_location,
             destination=destination,
             stop_locations=stop_locations,
             vehicle_type=vehicle_type,
             is_round_trip=is_round_trip,
+            route_cache=route_cache,
         )
-        tool_usage["summaries"].append(
-            f"{llm_provider_label} used the Google Maps route tool."
+        tool_usage["results"].append(
+            {
+                "tool": "get_route_context",
+                "arguments": {
+                    "start_location": start_location,
+                    "destination": destination,
+                    "stop_locations": stop_locations,
+                    "vehicle_type": vehicle_type,
+                    "is_round_trip": is_round_trip,
+                },
+                "result": result,
+            }
         )
+
         if result.get("route_available"):
-            optimized_stop_count = max(len(result.get("optimized_stop_locations", [])) - 1, 0)
-            tool_usage["summaries"][-1] = (
-                f"{llm_provider_label} used the Google Maps route and waypoint optimization tool "
-                f"for {len(stop_locations)} planned stops, "
-                f"{result.get('total_distance_km', 0)} km total"
-                + (
-                    f", with {optimized_stop_count} optimized stops."
-                    if optimized_stop_count > 1
-                    else "."
-                )
+            tool_usage["summaries"].append(
+                f"{llm_provider_label} called get_route_context and received "
+                f"{result.get('total_distance_km', 0)} km / "
+                f"{result.get('total_duration_minutes', 0)} min route facts."
             )
         else:
-            tool_usage["summaries"][-1] = (
-                f"{llm_provider_label} attempted the Google Maps route tool, but route facts were unavailable."
+            tool_usage["summaries"].append(
+                f"{llm_provider_label} called get_route_context, but route facts were unavailable."
             )
+
         return result
 
     def get_roadside_options(
@@ -206,31 +444,46 @@ def _build_tool_handlers(llm_provider_label: str):
         vehicle_type: str,
         is_round_trip: bool = False,
     ) -> dict:
+        """Look up optional route-adjacent Places suggestions, including profile interests."""
         result = get_roadside_tool_context(
             start_location=start_location,
             destination=destination,
             stop_locations=stop_locations,
             vehicle_type=vehicle_type,
             is_round_trip=is_round_trip,
+            route_cache=route_cache,
+            extra_search_profiles=interest_profiles,
+            recommendation_radius_miles=profile.recommendation_radius_miles,
         )
-        roadside_tool_result["suggestions"] = result.get("suggestions", [])
-        roadside_tool_result["warnings"] = result.get("warnings", [])
+        suggestions = result.get("suggestions", [])
+        tool_usage["results"].append(
+            {
+                "tool": "get_roadside_options",
+                "arguments": {
+                    "start_location": start_location,
+                    "destination": destination,
+                    "stop_locations": stop_locations,
+                    "vehicle_type": vehicle_type,
+                    "is_round_trip": is_round_trip,
+                },
+                "result": result,
+            }
+        )
 
         if result.get("suggestions_available"):
             tool_usage["summaries"].append(
-                f"{llm_provider_label} used the roadside attractions tool "
-                f"and found {len(result.get('suggestions', []))} optional stops."
+                f"{llm_provider_label} called get_roadside_options and received "
+                f"{len(suggestions)} optional route-adjacent stops."
             )
         else:
             tool_usage["summaries"].append(
-                f"{llm_provider_label} attempted the roadside attractions tool, but no suggestions were available."
+                f"{llm_provider_label} called get_roadside_options, but no route-adjacent stops were available."
             )
 
         return result
 
     return (
         tool_usage,
-        roadside_tool_result,
         {
             "get_route_context": get_route_context,
             "get_roadside_options": get_roadside_options,
@@ -238,74 +491,240 @@ def _build_tool_handlers(llm_provider_label: str):
     )
 
 
-def _generate_google_content(client: genai.Client, model: str, full_prompt: str, tool_functions: dict) -> str:
+def _generate_tool_calling_context(
+    client: genai.Client,
+    model: str,
+    full_prompt: str,
+    tool_functions: dict,
+) -> str:
+    tool_prompt = f"""{full_prompt}
+
+Tool-calling step:
+Decide whether Google Maps route facts or route-adjacent Places options would
+improve this road trip plan. For normal route planning, call get_route_context
+with your proposed ordered intermediate stop locations. If the user asks for
+recommended stops or their interests should shape stops, you may also call
+get_roadside_options. After any tool calls, reply with a short plain-text note.
+Do not return the final JSON in this step.
+"""
+    config_kwargs = {
+        "tools": [
+            tool_functions["get_route_context"],
+            tool_functions["get_roadside_options"],
+        ],
+        "tool_config": types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode=types.FunctionCallingConfigMode.AUTO,
+            )
+        ),
+        "automatic_function_calling": types.AutomaticFunctionCallingConfig(
+            maximum_remote_calls=3,
+        ),
+        "temperature": 0.2,
+        "max_output_tokens": 512,
+    }
+    try:
+        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    except AttributeError:
+        pass
+
+    response = client.models.generate_content(
+        model=model,
+        contents=tool_prompt,
+        config=types.GenerateContentConfig(**config_kwargs),
+    )
+    return response.text or ""
+
+
+def _build_tool_augmented_prompt(full_prompt: str, tool_usage: dict) -> str:
+    tool_results = tool_usage.get("results", [])
+    if not tool_results:
+        return full_prompt
+
+    compact_results = json.dumps(tool_results, ensure_ascii=True, indent=2)
+    return f"""{full_prompt}
+
+Tool results selected by the LLM:
+{compact_results}
+
+Use these tool results in the final JSON whenever they are relevant. Incorporate
+available route distance, duration, leg order, optimized stop order, warnings,
+and roadside options into summary, recommendations, budget_notes, trip_stops,
+and roadside_options. If a tool result reports unavailable data, do not
+apologize; continue with a useful itinerary grounded in the profile.
+"""
+
+
+def _generate_google_content(client: genai.Client, model: str, full_prompt: str) -> str:
+    # Gemini 2.5 has "thinking" turned on by default; for a structured-output
+    # JSON task the extra reasoning tokens dominate latency. Disabling it keeps
+    # the demo responsive while the backend validates route data afterward.
+    config_kwargs = {
+        "response_mime_type": "application/json",
+        "response_schema": TRIP_PLAN_RESPONSE_SCHEMA,
+        # Keep creativity low enough for schema adherence while still allowing
+        # the model to choose useful stops.
+        "temperature": 0.4,
+        "max_output_tokens": 2048,
+    }
+    try:
+        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    except AttributeError:
+        # Older google-genai builds don't expose ThinkingConfig; safe to skip.
+        pass
+
     response = client.models.generate_content(
         model=model,
         contents=full_prompt,
-        config=types.GenerateContentConfig(
-            tools=[
-                tool_functions["get_route_context"],
-                tool_functions["get_roadside_options"],
-            ],
-            toolConfig=types.ToolConfig(
-                functionCallingConfig=types.FunctionCallingConfig(
-                    mode=types.FunctionCallingConfigMode.AUTO,
-                )
-            ),
-        ),
+        config=types.GenerateContentConfig(**config_kwargs),
     )
     return response.text or ""
+
+
+def _resolve_route_destination(profile: Profile) -> str:
+    return profile.start_location if profile.is_round_trip else profile.destination
 
 
 def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
     llm_config = get_active_llm_config()
     if not llm_config.api_key:
-        raise ValueError(f"{llm_config.api_key_env_var} is not set in the environment.")
+        raise ValueError(
+            f"{llm_config.api_key_env_var} is not set. Add it to backend/.env before generating a trip."
+        )
 
     full_prompt = build_full_prompt(
         trip_request.profile,
         trip_request.request,
         trip_request.conversation_history,
     )
-    tool_usage, roadside_tool_result, tool_functions = _build_tool_handlers(
-        llm_config.provider_label
-    )
+    tool_usage = {
+        "summaries": [],
+        "results": [],
+    }
+    route_cache: dict = {}
+    interest_profiles = build_interest_search_profiles(trip_request.profile.interests)
 
-    client = genai.Client(api_key=llm_config.api_key)
-    raw_plan_text = _generate_google_content(
-        client,
-        llm_config.model,
-        full_prompt,
-        tool_functions,
-    )
+    warnings: list[str] = []
+    raw_plan_text = ""
+    final_prompt = full_prompt
 
-    generated_plan, warnings = parse_trip_plan(raw_plan_text, trip_request.profile)
+    try:
+        client = genai.Client(api_key=llm_config.api_key)
+    except Exception as exc:
+        # Surface a readable message but keep going with the fallback plan so
+        # the UI can still render profile-based stops and the user's inputs.
+        warnings.append(f"{llm_config.provider_label} client setup failed: {exc}")
+        client = None
+
+    if client is not None:
+        try:
+            tool_usage, tool_functions = _build_tool_handlers(
+                llm_config.provider_label,
+                trip_request.profile,
+                route_cache,
+            )
+            _generate_tool_calling_context(
+                client,
+                llm_config.model,
+                full_prompt,
+                tool_functions,
+            )
+            final_prompt = _build_tool_augmented_prompt(full_prompt, tool_usage)
+        except Exception as exc:
+            warnings.append(f"{llm_config.provider_label} tool-calling step failed: {exc}")
+
+    if client is not None:
+        try:
+            raw_plan_text = _generate_google_content(
+                client,
+                llm_config.model,
+                final_prompt,
+            )
+        except Exception as exc:
+            # Surface a readable message but keep going with the fallback plan so
+            # the UI can still render profile-based stops and the user's inputs.
+            warnings.append(f"{llm_config.provider_label} model call failed: {exc}")
+
+    generated_plan, parse_warnings = parse_trip_plan(raw_plan_text, trip_request.profile)
+    warnings.extend(parse_warnings)
+
     route = None
     enriched_stops = generated_plan.trip_stops
     route_warnings: list[str] = []
-    roadside_warnings: list[str] = roadside_tool_result["warnings"]
+    roadside_warnings: list[str] = []
     roadside_options = generated_plan.roadside_options
+    route_destination = _resolve_route_destination(trip_request.profile)
 
     try:
         route, enriched_stops, route_warnings = build_route_data(
             start_location=trip_request.profile.start_location,
-            destination=(
-                trip_request.profile.start_location
-                if trip_request.profile.is_round_trip
-                else trip_request.profile.destination
-            ),
+            destination=route_destination,
             trip_stops=generated_plan.trip_stops,
             vehicle_type=trip_request.profile.vehicle_type,
+            route_cache=route_cache,
         )
+        if route is not None:
+            tool_usage["summaries"].append(
+                f"Google Maps route data was calculated for {len(enriched_stops)} planned stops."
+            )
     except Exception as exc:
         route_warnings.append(f"Google Maps route data is unavailable right now: {exc}")
 
-    if not roadside_options and route is not None:
+    needs_interest_scan = (
+        route is not None
+        and bool(interest_profiles)
+        and not _has_interest_aligned_stop(enriched_stops, trip_request.profile)
+        and not _select_interest_aligned_options(roadside_options, trip_request.profile)
+    )
+
+    if route is not None and (not roadside_options or needs_interest_scan):
         try:
-            roadside_options, generated_roadside_warnings = get_roadside_suggestions_for_route(route)
+            generated_roadside_options, generated_roadside_warnings = get_roadside_suggestions_for_route(
+                route,
+                extra_search_profiles=interest_profiles,
+                recommendation_radius_miles=trip_request.profile.recommendation_radius_miles,
+            )
+            roadside_options = _merge_roadside_options(
+                roadside_options,
+                generated_roadside_options,
+            )
             roadside_warnings.extend(generated_roadside_warnings)
+            if generated_roadside_options:
+                tool_usage["summaries"].append(
+                    f"Google Places found {len(generated_roadside_options)} route-adjacent optional stops."
+                )
         except Exception as exc:
-            roadside_warnings.append(f"Roadside attraction suggestions are unavailable right now: {exc}")
+            roadside_warnings.append(
+                f"Roadside attraction suggestions are unavailable right now: {exc}"
+            )
+
+    if not _user_requested_no_stops(trip_request.request):
+        interest_promoted_trip_stops = _promote_interest_aligned_stop(
+            enriched_stops,
+            roadside_options,
+            trip_request.profile,
+        )
+        if len(interest_promoted_trip_stops) > len(enriched_stops):
+            enriched_stops = interest_promoted_trip_stops
+            warnings.append(
+                "An interest-matched stop was automatically added to the route "
+                "because the original itinerary did not reflect the profile interests."
+            )
+
+            try:
+                route, enriched_stops, promoted_route_warnings = build_route_data(
+                    start_location=trip_request.profile.start_location,
+                    destination=route_destination,
+                    trip_stops=enriched_stops,
+                    vehicle_type=trip_request.profile.vehicle_type,
+                    route_cache=route_cache,
+                )
+                route_warnings.extend(promoted_route_warnings)
+            except Exception as exc:
+                route_warnings.append(
+                    "An interest-matched stop was added, but the route could not be rebuilt right now: "
+                    f"{exc}"
+                )
 
     if _should_auto_add_recommended_stops(
         trip_request.request,
@@ -318,22 +737,22 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
             trip_request.profile,
         )
 
+        # Only rebuild the route when the promotion actually added a new stop;
+        # otherwise the existing route is already correct for the stop list.
         if len(promoted_trip_stops) > len(enriched_stops):
             enriched_stops = promoted_trip_stops
             warnings.append(
-                "Recommended stops were automatically added to the mapped route because your request asked for stops on the way."
+                "Recommended stops were automatically added to the mapped route "
+                "because your request asked for stops on the way."
             )
 
             try:
                 route, enriched_stops, promoted_route_warnings = build_route_data(
                     start_location=trip_request.profile.start_location,
-                    destination=(
-                        trip_request.profile.start_location
-                        if trip_request.profile.is_round_trip
-                        else trip_request.profile.destination
-                    ),
+                    destination=route_destination,
                     trip_stops=enriched_stops,
                     vehicle_type=trip_request.profile.vehicle_type,
+                    route_cache=route_cache,
                 )
                 route_warnings.extend(promoted_route_warnings)
             except Exception as exc:
@@ -341,6 +760,8 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
                     "Recommended stops were added, but the route could not be rebuilt right now: "
                     f"{exc}"
                 )
+
+    llm_tool_calling_used = bool(tool_usage["results"])
 
     return TripResponse(
         summary=generated_plan.summary,
@@ -350,7 +771,7 @@ def generate_trip_plan(trip_request: TripRequest) -> TripResponse:
         roadside_options=roadside_options,
         route=route,
         warnings=warnings + route_warnings + roadside_warnings,
-        tool_calling_used=bool(tool_usage["summaries"]),
+        tool_calling_used=llm_tool_calling_used,
         tool_calling_summary=" ".join(tool_usage["summaries"]),
-        prompt_used=full_prompt,
+        prompt_used=final_prompt,
     )

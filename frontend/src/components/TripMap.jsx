@@ -5,6 +5,10 @@ const UNITED_STATES_CENTER = { lat: 39.8283, lng: -98.5795 };
 const UNITED_STATES_ZOOM = 4;
 const MAX_ROUTE_SAMPLE_POINTS = 4;
 const DEFAULT_PLACE_SEARCH_RADIUS_METERS = 12000;
+// Google Places Nearby Search hard-caps radius at 50km. Bigger values get
+// silently clamped or return zero results, which is why a 75 mi profile
+// radius used to produce an empty hiking layer.
+const MAX_PLACE_SEARCH_RADIUS_METERS = 50000;
 const PLACE_RESULTS_LIMIT = 12;
 const DEFAULT_PLACE_MARKER_COLOR = "#38bdf8";
 
@@ -32,13 +36,14 @@ const PLACE_LAYER_DEFINITIONS = {
   hiking: {
     label: "Hiking trails",
     markerColor: "#10b981",
-    searches: [{ keyword: "hiking trail", type: "park" }],
+    searches: [
+      { keyword: "hiking trail", type: "park" },
+      { keyword: "state park", type: "park" },
+      { keyword: "nature preserve" },
+      { keyword: "trailhead" },
+    ],
   },
 };
-
-function normalizeLocation(value) {
-  return value.trim().toLowerCase();
-}
 
 function normalizeComparableLocation(value) {
   return value
@@ -111,7 +116,7 @@ function getSuggestedLayerIds(profile) {
     nextIds.push("nightlife");
   }
 
-  if (/(hiking|trail|nature|outdoor|outdoors|waterfall|mountain|park)/.test(combinedText)) {
+  if (/(hik|trail|nature|outdoor|outdoors|waterfall|mountain|park)/.test(combinedText)) {
     nextIds.push("hiking");
   }
 
@@ -232,66 +237,58 @@ function createSyntheticStop(location, reason, kind) {
   };
 }
 
+// Split the AI's trip stops into flexible intermediate stops (reorderable)
+// and fixed anchors (start, destination, round-trip return).
 function buildEditableStopGroups(profile, tripStops) {
-  const sourceStops = (tripStops ?? [])
+  const startLocation = profile?.start_location ?? "";
+  const destinationLocation = profile?.destination ?? "";
+  const isRoundTrip = Boolean(profile?.is_round_trip);
+
+  // Drop any stop that duplicates the start or destination anchor — those are
+  // rendered as fixed cards regardless of what the model produced. This keeps
+  // the destination card out of the editable list even if the LLM placed it
+  // somewhere other than the end of the array.
+  const intermediateStops = (tripStops ?? [])
     .filter((stop) => stop?.location?.trim())
-    .filter(
-      (stop) => !locationsRoughlyMatch(stop.location, profile?.start_location ?? ""),
-    )
+    .filter((stop) => !locationsRoughlyMatch(stop.location, startLocation))
+    .filter((stop) => !destinationLocation || !locationsRoughlyMatch(stop.location, destinationLocation))
     .map((stop) => ({
       ...stop,
       kind: "stop",
       isLocked: false,
       isSynthetic: false,
     }));
-  const workingStops = [...sourceStops];
+
+  // Try to preserve the model's destination card (with its reason/coords) if
+  // it was actually returned; otherwise fall back to a synthetic one built
+  // from the profile.
+  const modelDestination = (tripStops ?? []).find(
+    (stop) => destinationLocation && locationsRoughlyMatch(stop.location ?? "", destinationLocation),
+  );
+
   const fixedStops = [];
-  const normalizedStart = normalizeLocation(profile?.start_location ?? "");
-  const normalizedDestination = normalizeLocation(profile?.destination ?? "");
 
-  if (
-    profile?.is_round_trip &&
-    workingStops.length > 0 &&
-    locationsRoughlyMatch(workingStops[workingStops.length - 1].location, profile?.start_location ?? "")
-  ) {
-    const returnStop = workingStops.pop();
-    fixedStops.unshift({
-      ...returnStop,
-      kind: "return",
-      isLocked: true,
-    });
+  if (destinationLocation) {
+    fixedStops.push(
+      modelDestination
+        ? {
+            ...modelDestination,
+            kind: "destination",
+            isLocked: true,
+            isSynthetic: false,
+          }
+        : createSyntheticStop(
+            destinationLocation,
+            "Destination chosen from your trip profile.",
+            "destination",
+          ),
+    );
   }
 
-  if (normalizedDestination) {
-    if (
-      workingStops.length > 0 &&
-      locationsRoughlyMatch(workingStops[workingStops.length - 1].location, profile?.destination ?? "")
-    ) {
-      const destinationStop = workingStops.pop();
-      fixedStops.unshift({
-        ...destinationStop,
-        kind: "destination",
-        isLocked: true,
-      });
-    } else {
-      fixedStops.unshift(
-        createSyntheticStop(
-          profile.destination,
-          "Destination chosen from your trip profile.",
-          "destination",
-        ),
-      );
-    }
-  }
-
-  if (
-    profile?.is_round_trip &&
-    normalizedStart &&
-    !fixedStops.some((stop) => stop.kind === "return")
-  ) {
+  if (isRoundTrip && startLocation) {
     fixedStops.push(
       createSyntheticStop(
-        profile.start_location,
+        startLocation,
         "Return to your starting location to complete the round trip.",
         "return",
       ),
@@ -299,7 +296,7 @@ function buildEditableStopGroups(profile, tripStops) {
   }
 
   return {
-    editableStops: workingStops,
+    editableStops: intermediateStops,
     fixedStops,
   };
 }
@@ -464,6 +461,19 @@ function getSidebarLabel(stop, index, totalStops) {
   }
 
   return `Stop ${index}`;
+}
+
+function getSidebarRoleText(stop) {
+  if (stop.kind === "start") {
+    return "Fixed origin";
+  }
+  if (stop.kind === "return") {
+    return "Fixed return";
+  }
+  if (stop.kind === "destination") {
+    return "Required destination";
+  }
+  return "Flexible stop";
 }
 
 function buildWaypointInfoContent(waypoint, index, route, tripStops, profile) {
@@ -986,9 +996,12 @@ function TripMap({
         for (const layer of activeLayers) {
           for (const sampledPoint of sampledPoints) {
             for (const search of layer.searches) {
-              const placeSearchRadius = profile?.recommendation_radius_miles
-                ? Math.round(profile.recommendation_radius_miles * 1609)
-                : DEFAULT_PLACE_SEARCH_RADIUS_METERS;
+              const placeSearchRadius = Math.min(
+                profile?.recommendation_radius_miles
+                  ? Math.round(profile.recommendation_radius_miles * 1609)
+                  : DEFAULT_PLACE_SEARCH_RADIUS_METERS,
+                MAX_PLACE_SEARCH_RADIUS_METERS,
+              );
               const results = await performNearbySearch(placesServiceRef.current, maps, {
                 location: sampledPoint,
                 radius: placeSearchRadius,
@@ -1151,8 +1164,9 @@ function TripMap({
                 <div>
                   <p className="route-stop-label">Start</p>
                   <h4>{profile.start_location || "Starting point"}</h4>
-                  <p className="muted-text">Fixed origin</p>
+                  <p className="route-stop-role">Fixed origin</p>
                 </div>
+                <span className="route-stop-lock">Fixed</span>
                 {hoveredStopIndex === -1 && (
                   <div className="route-stop-tooltip">
                     <p className="route-stop-tooltip-label">Starting Point</p>
@@ -1168,12 +1182,10 @@ function TripMap({
               </div>
 
               {orderedSidebarStops.map((stop, index) => {
-                const movableIndex = editableStops.findIndex(
-                  (editableStop) =>
-                    editableStop.location === stop.location &&
-                    editableStop.reason === stop.reason,
-                );
-                const isMovable = movableIndex !== -1;
+                // editableStops and fixedStops do not overlap by construction,
+                // so "movable" means the stop is not locked.
+                const isMovable = !stop.isLocked;
+                const movableIndex = isMovable ? index : -1;
                 const leg = activeRoute?.legs?.[index];
 
                 return (
@@ -1191,6 +1203,7 @@ function TripMap({
                       </p>
                       <h4>{stop.name}</h4>
                       <p className="muted-text">{stop.location}</p>
+                      <p className="route-stop-role">{getSidebarRoleText(stop)}</p>
                     </div>
 
                     {isMovable ? (
