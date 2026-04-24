@@ -1,3 +1,5 @@
+import re
+
 from app.models.trip_models import ConversationTurn, Profile
 
 
@@ -11,7 +13,28 @@ Include the final destination as the last trip stop.
 When the user asks for stops on the way, recommended places, scenic detours, or things to do en route, include those places as actual trip_stops in the mapped itinerary instead of only mentioning them in prose.
 Unless the user explicitly asks for a direct route with no stops, multi-day trips should usually include meaningful intermediate trip_stops before the destination.
 When a user asks for a refinement, update the previous plan coherently instead of ignoring prior context.
+
+The user's listed interests are a hard personalization signal, not a decoration.
+For every interest they name, try to include at least one intermediate trip_stop
+that actually reflects it (e.g. interests: "hiking" -> pick a specific trail,
+state park, or nature preserve as a stop; interests: "food" -> pick a notable
+local eatery or food destination; interests: "live music" -> pick a real
+venue). Do not fall back to generic museums or landmarks that ignore the user's
+stated interests.
 """
+
+
+INTEREST_SPLIT_PATTERN = re.compile(r"[,;/]|\band\b|\b&\b", flags=re.IGNORECASE)
+
+
+def _split_interests(interests: str) -> list[str]:
+    if not interests:
+        return []
+    return [
+        piece.strip()
+        for piece in INTEREST_SPLIT_PATTERN.split(interests)
+        if piece.strip()
+    ]
 
 
 def build_system_prompt(profile: Profile) -> str:
@@ -34,12 +57,16 @@ def build_system_prompt(profile: Profile) -> str:
     if travel_style_text and travel_style_text.lower() != "none":
         profile_lines.append(f"- Travel style: {travel_style_text}")
 
-    profile_lines.extend(
-        [
-            f"- Interests: {profile.interests}",
-            f"- Preferred stops: {stops_text}",
-        ]
-    )
+    interest_items = _split_interests(profile.interests)
+    if interest_items:
+        joined_interests = ", ".join(interest_items)
+        profile_lines.append(
+            f"- Interests (must shape trip_stops selection): {joined_interests}"
+        )
+    else:
+        profile_lines.append("- Interests: None provided")
+
+    profile_lines.append(f"- Preferred stops: {stops_text}")
 
     if profile.max_daily_driving_miles:
         profile_lines.append(
@@ -152,16 +179,10 @@ Return valid JSON with exactly these top-level keys:
 Do not add markdown fences.
 Do not add explanation before or after the JSON.
 Use snake_case keys exactly as written.
-
-Tool use:
-- You have access to a tool named get_route_context.
-- You have access to a tool named get_roadside_options.
-- Use get_route_context when you need accurate route distance, duration, or leg order grounded in Google Maps data.
-- The route tool can also return a Google-optimized stop order when multiple stops are present.
-- For road trip planning requests, you should usually call it once after selecting the ordered stop locations.
-- Use get_roadside_options when you want interesting optional attractions or oddities near the route.
-- For road trip planning requests, you should usually call get_roadside_options once after the ordered stop locations are selected.
-- Use the tool result to improve summary, recommendation, and budget guidance with realistic travel context.
+If exact route facts are unavailable, still return useful JSON using the profile,
+the destination, and common road trip planning knowledge. Do not apologize or ask
+the user to verify addresses unless the profile itself is missing required
+locations.
 
 Rules:
 - summary: one short paragraph string
@@ -187,6 +208,7 @@ Rules:
 - always include the profile destination somewhere in the ordered trip_stops
 - if Round trip is Yes, include the destination before returning to the starting location, and include the starting location again as the final stop
 - if Round trip is No, include the destination as the last stop
+- if the user profile lists interests, at least one intermediate trip_stop must clearly match the primary interest (for example: "hiking" -> a specific hiking trail, state park, or nature preserve; "live music" -> a specific venue; "food" -> a specific local eatery). Do not substitute unrelated museums or landmarks.
 """
 
 

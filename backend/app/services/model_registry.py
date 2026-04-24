@@ -3,13 +3,17 @@ from dataclasses import dataclass
 
 
 # Change only this value when you want to switch Gemini models.
-ACTIVE_MODEL = "gemini-2.5-flash"
+# flash-lite is the default because it returns in ~5-10s vs. flash's ~30-40s
+# for this kind of structured-output + function-calling workload, which
+# matters a lot during live demos. Swap to "gemini-2.5-flash" if you need
+# higher-quality reasoning and can tolerate the longer wait.
+ACTIVE_MODEL = "gemini-2.5-flash-lite"
 
 
 # Optional reference list so it's easy to remember what you can swap to.
 MODEL_OPTIONS = [
-    "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
 ]
 
 

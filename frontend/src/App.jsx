@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import LocationAutocompleteInput from "./components/LocationAutocompleteInput";
 import TripMap from "./components/TripMap";
+import ItineraryPanel from "./components/ItineraryPanel";
 import "./App.css";
 
 const API_BASE_URL =
@@ -263,6 +264,50 @@ function areRoutesEqual(leftRoute, rightRoute) {
   );
 }
 
+const RESOLVED_ROUTE_WARNING_PATTERNS = [
+  /route data is unavailable/i,
+  /route lookup failed/i,
+  /not enough route points/i,
+  /could not geocode/i,
+  /could not be geocoded/i,
+  /route could not be rebuilt/i,
+  /route facts were unavailable/i,
+];
+
+function areStringArraysEqual(leftItems = [], rightItems = []) {
+  if (leftItems.length !== rightItems.length) {
+    return false;
+  }
+
+  return leftItems.every((item, index) => item === rightItems[index]);
+}
+
+function buildClientRouteResponse(response, nextRoute, nextTripStops) {
+  const nextWarnings = nextRoute
+    ? (response.warnings ?? []).filter(
+        (warning) =>
+          !RESOLVED_ROUTE_WARNING_PATTERNS.some((pattern) => pattern.test(warning)),
+      )
+    : (response.warnings ?? []);
+  const nextToolSummary = nextRoute
+    ? (response.tool_calling_summary ?? "")
+        .replace(
+          /Google attempted the Google Maps route tool, but route facts were unavailable\.\s*/g,
+          "",
+        )
+        .trim()
+    : response.tool_calling_summary;
+
+  return {
+    ...response,
+    route: nextRoute,
+    trip_stops: nextTripStops,
+    warnings: nextWarnings,
+    tool_calling_summary: nextToolSummary,
+    tool_calling_used: Boolean(nextToolSummary),
+  };
+}
+
 function App() {
   const [profile, setProfile] = useState(getInitialProfile);
   const [request, setRequest] = useState("");
@@ -273,6 +318,7 @@ function App() {
   const [loadingSeconds, setLoadingSeconds] = useState(0);
   const [error, setError] = useState("");
   const [tripMapRevision, setTripMapRevision] = useState(0);
+  const [promptVisibleForVersion, setPromptVisibleForVersion] = useState(null);
   const requestTextareaRef = useRef(null);
   const hasResponse = responseHistory.length > 0;
 
@@ -299,6 +345,12 @@ function App() {
   useLayoutEffect(() => {
     const textarea = requestTextareaRef.current;
     if (!textarea) {
+      return;
+    }
+
+    if (hasResponse) {
+      textarea.style.height = "";
+      textarea.style.overflowY = "auto";
       return;
     }
 
@@ -379,6 +431,7 @@ function App() {
     setRequest("");
     setError("");
     setTripMapRevision(0);
+    setPromptVisibleForVersion(null);
     localStorage.removeItem("roadTripProfile");
   }
 
@@ -389,6 +442,7 @@ function App() {
     setRequest("");
     setError("");
     setTripMapRevision(0);
+    setPromptVisibleForVersion(null);
   }
 
   function handleAddRoadsideOption(option) {
@@ -442,18 +496,17 @@ function App() {
         return current;
       }
 
+      const nextResponse = buildClientRouteResponse(current, nextRoute, nextTripStops);
       if (
         areRoutesEqual(current.route, nextRoute) &&
-        areTripStopsEqual(current.trip_stops, nextTripStops)
+        areTripStopsEqual(current.trip_stops, nextTripStops) &&
+        areStringArraysEqual(current.warnings ?? [], nextResponse.warnings ?? []) &&
+        current.tool_calling_summary === nextResponse.tool_calling_summary
       ) {
         return current;
       }
 
-      return {
-        ...current,
-        route: nextRoute,
-        trip_stops: nextTripStops,
-      };
+      return nextResponse;
     });
 
     setResponseHistory((previous) => {
@@ -462,9 +515,20 @@ function App() {
       }
 
       const latestEntry = previous[previous.length - 1];
+      const nextLatestResponse = buildClientRouteResponse(
+        latestEntry.response,
+        nextRoute,
+        nextTripStops,
+      );
       if (
         areRoutesEqual(latestEntry.response.route, nextRoute) &&
-        areTripStopsEqual(latestEntry.response.trip_stops, nextTripStops)
+        areTripStopsEqual(latestEntry.response.trip_stops, nextTripStops) &&
+        areStringArraysEqual(
+          latestEntry.response.warnings ?? [],
+          nextLatestResponse.warnings ?? [],
+        ) &&
+        latestEntry.response.tool_calling_summary ===
+          nextLatestResponse.tool_calling_summary
       ) {
         return previous;
       }
@@ -473,11 +537,7 @@ function App() {
         index === previous.length - 1
           ? {
               ...entry,
-              response: {
-                ...entry.response,
-                route: nextRoute,
-                trip_stops: nextTripStops,
-              },
+              response: nextLatestResponse,
             }
           : entry,
       );
@@ -579,7 +639,7 @@ function App() {
     );
     setExpandedVersions((previous) => ({
       ...previous,
-      [nextEntry.version]: false,
+      [nextEntry.version]: true,
     }));
     setRequest("");
   }
@@ -600,6 +660,10 @@ function App() {
       ...previous,
       [version]: !previous[version],
     }));
+  }
+
+  function togglePromptForVersion(version) {
+    setPromptVisibleForVersion((previous) => (previous === version ? null : version));
   }
 
   function getSummaryPreview(summary) {
@@ -647,7 +711,7 @@ function App() {
         <textarea
           ref={requestTextareaRef}
           rows={1}
-          className="textarea textarea--composer"
+          className={`textarea textarea--composer${hasResponse ? " textarea--refinement-composer" : ""}`}
           value={request}
           onChange={handleRequestInputChange}
           onKeyDown={handleRequestKeyDown}
@@ -972,28 +1036,44 @@ function App() {
                 <div className="result-card">
                   <h3 className="result-card-title">Trip Overview</h3>
 
-                  <p className="overview-copy">{entry.response.summary}</p>
+                  <p className="overview-copy">
+                    {entry.response.summary?.trim()
+                      ? entry.response.summary
+                      : "No summary was returned for this version."}
+                  </p>
 
                   <div className="overview-section">
                     <p className="overview-section-kicker">Recommendations</p>
-                    <ul className="rec-list">
-                      {entry.response.recommendations.map((item, index) => (
-                        <li key={index} className="rec-item">
-                          <span className="rec-arrow">&#8594;</span>
-                          <span>{item}</span>
-                        </li>
-                      ))}
-                    </ul>
+                    {entry.response.recommendations?.length > 0 ? (
+                      <ul className="rec-list">
+                        {entry.response.recommendations.map((item, index) => (
+                          <li key={index} className="rec-item">
+                            <span className="rec-arrow">&#8594;</span>
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="muted-text">No recommendations were returned.</p>
+                    )}
                   </div>
 
                   <div className="overview-section budget-section">
                     <p className="overview-section-kicker">Budget Notes</p>
-                    <p className="overview-copy">{entry.response.budget_notes}</p>
+                    <p className="overview-copy">
+                      {entry.response.budget_notes?.trim()
+                        ? entry.response.budget_notes
+                        : "No budget notes were returned for this version."}
+                    </p>
                   </div>
 
-                  {entry.response.roadside_options?.length > 0 && (
-                    <div className="overview-section">
-                      <p className="overview-section-kicker">Cool Roadside Options</p>
+                  <div className="overview-section">
+                    <ItineraryPanel response={entry.response} />
+                  </div>
+
+                  <div className="overview-section">
+                    <p className="overview-section-kicker">Cool Roadside Options</p>
+                    {entry.response.roadside_options?.length > 0 ? (
                       <ul className="roadside-option-list">
                         {entry.response.roadside_options.map((option, index) => {
                           const isAdded = entry.response.trip_stops.some(
@@ -1025,16 +1105,28 @@ function App() {
                           );
                         })}
                       </ul>
+                    ) : (
+                      <p className="muted-text">No roadside options were returned for this version.</p>
+                    )}
+                  </div>
+
+                  {entry.response.tool_calling_used ? (
+                    <div className="tooling-box">
+                      <p className="tooling-box-label">Route & Data Tools Used</p>
+                      <p className="tooling-box-text">
+                        {entry.response.tool_calling_summary?.trim()
+                          ? entry.response.tool_calling_summary
+                          : "Backend route and Places enrichment ran for this version."}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="tooling-box tooling-box--muted">
+                      <p className="tooling-box-label">Route & Data Tools</p>
+                      <p className="tooling-box-text">
+                        No backend route or Places data was returned for this version.
+                      </p>
                     </div>
                   )}
-
-                  {entry.response.tool_calling_used &&
-                    entry.response.tool_calling_summary && (
-                      <div className="tooling-box">
-                        <p className="tooling-box-label">Route & Data Tools Used</p>
-                        <p className="tooling-box-text">{entry.response.tool_calling_summary}</p>
-                      </div>
-                    )}
 
                   {entry.response.warnings?.length > 0 && (
                     <div className="warning-box">
@@ -1044,6 +1136,26 @@ function App() {
                           <li key={index}>{warning}</li>
                         ))}
                       </ul>
+                    </div>
+                  )}
+
+                  {entry.response.prompt_used && (
+                    <div className="overview-section prompt-used-section">
+                      <div className="prompt-used-header">
+                        <p className="overview-section-kicker">Prompt Sent to the Model</p>
+                        <button
+                          type="button"
+                          className="secondary-button prompt-used-toggle"
+                          onClick={() => togglePromptForVersion(entry.version)}
+                        >
+                          {promptVisibleForVersion === entry.version
+                            ? "Hide prompt"
+                            : "View prompt"}
+                        </button>
+                      </div>
+                      {promptVisibleForVersion === entry.version && (
+                        <pre className="prompt-used-block">{entry.response.prompt_used}</pre>
+                      )}
                     </div>
                   )}
                 </div>

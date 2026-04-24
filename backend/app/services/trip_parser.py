@@ -59,15 +59,67 @@ def parse_trip_plan(raw_text: str, profile: Profile) -> tuple[GeneratedTripPlan,
 
 def build_fallback_trip_plan(summary_text: str, profile: Profile) -> GeneratedTripPlan:
     stops = build_fallback_stops(profile)
-    recommendations = [stop.reason for stop in stops[:3]]
+    recommendations = _build_fallback_recommendations(stops, profile)
 
     return GeneratedTripPlan(
-        summary=summary_text.strip() or "A direct road trip itinerary was generated from your profile.",
+        summary=_build_fallback_summary(summary_text, profile),
         recommendations=recommendations,
-        budget_notes="Route details were generated from your profile because the model output was incomplete.",
+        budget_notes=_build_fallback_budget_notes(profile),
         trip_stops=stops,
         roadside_options=[],
     )
+
+
+def _build_fallback_summary(summary_text: str, profile: Profile) -> str:
+    cleaned_summary = summary_text.strip()
+    if cleaned_summary and not _looks_like_model_failure(cleaned_summary):
+        return cleaned_summary
+
+    destination = profile.destination.strip() or "your destination"
+    start = profile.start_location.strip() or "your starting point"
+    round_trip_text = " round trip" if profile.is_round_trip else ""
+    return f"A practical{round_trip_text} road trip from {start} to {destination} was created from your profile."
+
+
+def _looks_like_model_failure(summary_text: str) -> bool:
+    normalized = summary_text.lower()
+    failure_markers = (
+        "i'm sorry",
+        "i am sorry",
+        "encountered an issue",
+        "could not be geocoded",
+        "couldn't be geocoded",
+        "unable to geocode",
+        "verify the address",
+    )
+    return any(marker in normalized for marker in failure_markers)
+
+
+def _build_fallback_recommendations(stops: list[TripStop], profile: Profile) -> list[str]:
+    recommendations: list[str] = []
+
+    if profile.interests.strip():
+        recommendations.append(
+            f"Use your interests ({profile.interests.strip()}) to choose optional stops along the mapped route."
+        )
+
+    if profile.max_daily_driving_miles:
+        recommendations.append(
+            f"Keep each driving day under {profile.max_daily_driving_miles} miles."
+        )
+
+    recommendations.extend(stop.reason for stop in stops[:3])
+    return recommendations[:3]
+
+
+def _build_fallback_budget_notes(profile: Profile) -> str:
+    travel_style = profile.travel_style.strip().lower()
+    lodging_note = (
+        "Include lodging costs for overnight stops."
+        if travel_style in {"hotel", "rv sleeping", "camping"}
+        else "Estimate fuel, food, parking, and any attraction fees before leaving."
+    )
+    return f"Route details were generated from your profile because the model output was incomplete. {lodging_note}"
 
 
 def build_fallback_stops(profile: Profile) -> list[TripStop]:
