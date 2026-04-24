@@ -7,7 +7,7 @@ from dataclasses import dataclass
 # for this kind of structured-output + function-calling workload, which
 # matters a lot during live demos. Swap to "gemini-2.5-flash" if you need
 # higher-quality reasoning and can tolerate the longer wait.
-ACTIVE_MODEL = "gemini-2.5-flash-lite"
+ACTIVE_MODEL = "gemini-2.5-flash"
 
 
 # Optional reference list so it's easy to remember what you can swap to.
