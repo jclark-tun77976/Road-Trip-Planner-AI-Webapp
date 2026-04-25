@@ -10,8 +10,10 @@ Keep the response clear, organized, and student-project appropriate.
 Build an ordered itinerary that can be mapped.
 Each trip stop should use a real, specific location string that can be geocoded.
 Include the final destination as the last trip stop.
-When the user asks for stops on the way, recommended places, scenic detours, or things to do en route, include those places as actual trip_stops in the mapped itinerary instead of only mentioning them in prose.
-Unless the user explicitly asks for a direct route with no stops, multi-day trips should usually include meaningful intermediate trip_stops before the destination.
+When the user asks for stops on the way, recommended places, scenic detours, or things to do en route, 
+include those places as actual trip_stops in the mapped itinerary instead of only mentioning them in prose.
+Unless the user explicitly asks for a direct route with no stops, multi-day trips should usually include meaningful 
+intermediate trip_stops before the destination.
 When a user asks for a refinement, update the previous plan coherently instead of ignoring prior context.
 
 The user's listed interests are a hard personalization signal, not a decoration.
@@ -164,7 +166,8 @@ Latest user request:
 {request}
 
 {constraint_block}
-If previous conversation history exists, treat the latest user request as a refinement of the existing trip unless the user explicitly asks to start over.
+If previous conversation history exists, treat the latest user request as a refinement of the existing trip unless the user explicitly 
+asks to start over.
 Keep useful prior decisions that still fit the user's newest direction.
 Revise summary, recommendations, budget notes, and trip stops so they reflect the latest request.
 If useful, include optional roadside attraction ideas that fit the route.
@@ -190,7 +193,8 @@ Rules:
 - budget_notes: one short paragraph string
 - trip_stops: ordered array of stop objects
 - roadside_options: array of 0 to 5 optional attraction objects
-- if the user asks for recommended stops on the way, scenic stops, or route suggestions, put the best 2 to 4 of those recommendations directly into trip_stops when they fit the trip length
+- if the user asks for recommended stops on the way, scenic stops, or route suggestions, put the best 2 to 4 of those
+ recommendations directly into trip_stops when they fit the trip length
 - use roadside_options only for extra optional ideas that are not already in trip_stops
 - each trip_stops item must contain:
   - day
@@ -206,9 +210,12 @@ Rules:
 - location must be a real-world place string suitable for Google Maps geocoding
 - order should increase from the start of the trip to the final destination
 - always include the profile destination somewhere in the ordered trip_stops
-- if Round trip is Yes, include the destination before returning to the starting location, and include the starting location again as the final stop
+- if Round trip is Yes, include the destination before returning to the starting location, and include the starting location again
+ as the final stop
 - if Round trip is No, include the destination as the last stop
-- if the user profile lists interests, at least one intermediate trip_stop must clearly match the primary interest (for example: "hiking" -> a specific hiking trail, state park, or nature preserve; "live music" -> a specific venue; "food" -> a specific local eatery). Do not substitute unrelated museums or landmarks.
+- if the user profile lists interests, at least one intermediate trip_stop must clearly match the primary interest 
+(for example: "hiking" -> a specific hiking trail, state park, or nature preserve; "live music" -> a specific venue; "food" -> a specific local 
+eatery). Do not substitute unrelated museums or landmarks.
 """
 
 
