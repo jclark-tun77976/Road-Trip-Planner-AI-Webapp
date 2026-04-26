@@ -8,8 +8,6 @@ Google Maps and refine iteratively.
 
 - Justin Clark
 
-> Replace the placeholder rows above with your teammates before submitting.
-
 ## Chosen domain
 
 **Travel planning / road trip itinerary generation.** The user persona is a
